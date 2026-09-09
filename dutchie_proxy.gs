@@ -3562,11 +3562,48 @@ function reportBug_(params, reporter) {
     // line. Without this, the pinned GXCore library rejected the report ("title required") and the old code
     // ignored that result — returning ok:true, so the report was silently lost while the user saw success.
     const title = (params.title && String(params.title).trim()) || desc.split('\n')[0].slice(0, 80).trim();
+
+    /* FORWARD `context`, AND READ `tab` OUT OF IT.
+     *
+     * gx-bugreport.js sends ONE state field — `context`, a JSON snapshot carrying the browser, screen
+     * size, online flag, a Pacific timestamp, RECENT JS ERRORS, and this app's own {tab: section}. It
+     * sends no top-level `tab`, `appTab` or `appStore` at all; the payload is exactly
+     * {action, title, desc, priority, reporter, appVer, context}. So the three fields this call used to
+     * read were reading a payload that has not contained them since the inline form was deleted (the
+     * migration recorded at index.html:917), and `context` — the only one actually being sent — was
+     * never forwarded at all.
+     *
+     * MEASURED 2026-09-09 over all 19 bugs Sales has ever filed: `tab` was populated on the four filed
+     * 2026-08-14..17 and on NONE of the fourteen since 2026-08-25, and `context` on zero of nineteen.
+     * The break is the form migration, not a Core pin — this repo re-pinned to v213 specifically so
+     * gxIngestBug would self-install the bug_reports.context header, and that header has been storing
+     * an empty string ever since because nothing was ever handed to it. The v213 note verified
+     * reporter/tab/app_version, three fields that were fine, and context was not among them.
+     *
+     * WHAT IT COST, concretely. Three of those fourteen read "App stalls on connecting", "the page
+     * still hangs on loading" and "loading" — the v2.559 `defer` bug, filed three times across
+     * v2.557..v2.559 before anyone diagnosed it. The cause was a single ReferenceError thrown during
+     * boot: one console error, no UI, an app that looked merely slow. `recentErrors` is in the
+     * snapshot. All three reports would have arrived carrying the exact error.
+     *
+     * THE PARSE CANNOT SINK THE REPORT. tab is a nicety; the report is the point. A malformed context
+     * costs the tab column and nothing else, and the raw string still goes up either way — Core stores
+     * whatever it is given, and an unparseable snapshot is still evidence. Same rule the render guards
+     * follow: a decoration must never take the payload with it.
+     *
+     * appTab / appStore stay as fallbacks. They are dead against today's shared form, but they cost a
+     * `||` and they are what a future top-level field would arrive as. */
+    const ctx = String(params.context || '');
+    let ctxTab = '';
+    try { ctxTab = String((JSON.parse(ctx) || {}).tab || ''); } catch (e) { ctxTab = ''; }
+
     const r = GXCore.gxIngestBug('sales', reporter, {
       title, priority, desc,
       appVer:   params.appVer   || '',
       appStore: params.appStore || '',
-      appTab:   params.appTab   || ''
+      tab:      ctxTab || params.appTab || '',
+      appTab:   params.appTab   || '',
+      context:  ctx
     });
     if (!r || !r.ok) return jsonOut_({ ok: false, error: (r && r.error) || 'bug report was not saved' });
     return jsonOut_({ ok: true });

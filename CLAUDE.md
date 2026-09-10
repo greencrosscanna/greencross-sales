@@ -527,6 +527,33 @@ naming the bug id and saying explicitly **not** to re-file it.
 a real bug on the board and sending a real email. What was checked live is that the deployed script
 compiles and serves (`libversion` → 315) and that the auth gate still sits above this code.
 
+### That commit also shipped two NUL bytes, and the interesting part is what it did NOT break
+
+`bugMailOnce_`'s cache-key delimiter was written to disk as the raw byte instead of an escape —
+two NULs at offsets 196535/196563 of `dutchie_proxy.gs`, in `edc075d`, and `clasp push` carried
+them to the live project faithfully. **Runtime was never affected**: a NUL inside a JS string
+literal is legal, and the escaped form produces a byte-identical string (verified by executing
+`bugMailOnce_` and reading its digest input back).
+
+- **Every agent-facing grep went blind, and that cost real time.** The `grep` a Claude Code session
+  runs wraps ugrep, which refuses a binary file wherever the NUL sits — so the whole backend was
+  invisible to every grep an agent made. A peer session concluded the implementation did not exist
+  while it sat right there.
+- **The push gate was NOT disabled, contrary to how this was first reported — twice, independently.**
+  `gx-preflight.sh` runs under `/bin/sh`, where `grep` is `/usr/bin/grep`, and BSD grep classifies a
+  file from its **first block only**. These NULs were at ~196KB. **Measured, by running the real gate
+  against the real file with a genuine `debugger;` and a real localhost URL appended: it caught both,
+  with line numbers, and printed PUSH BLOCKED.**
+- **The lesson is that position decided it and nothing chose the position.** The same NUL at byte 22
+  does blind `/usr/bin/grep`; at byte 260000 it does not. Two bytes landing 196KB earlier would have
+  silenced every check in the hook.
+- **Measure a tooling claim with the tool that actually runs.** Both wrong readings came from testing
+  with the agent's grep rather than the hook's. That is the same error as reading `appsscript.json`
+  to learn what a deployed app is running.
+- `tests/binary_source_test.js` asserts no shipped source contains a NUL, and pins the position
+  mechanism so the invariant reads as a rule rather than a superstition. The suite-wide fix — `grep
+  -a` in `gx-preflight.sh` — is gx-theme's and has been asked for.
+
 
 ## Sync with the brain — run `/gxbrain` (or say "brain sync")
 

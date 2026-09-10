@@ -3723,7 +3723,7 @@ function bugMailOnce_(reporter, title, desc) {
   let lock = null;
   try {
     const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,
-      String(reporter || '') + ' ' + String(title || '') + ' ' + String(desc || ''),
+      String(reporter || '') + '\u0000' + String(title || '') + '\u0000' + String(desc || ''),
       Utilities.Charset.UTF_8);
     const key = 'bugmail:unannounced:' + Utilities.base64EncodeWebSafe(digest);
     lock = LockService.getScriptLock();

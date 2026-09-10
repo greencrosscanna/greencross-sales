@@ -3594,8 +3594,13 @@ function reportBug_(params, reporter) {
      * appTab / appStore stay as fallbacks. They are dead against today's shared form, but they cost a
      * `||` and they are what a future top-level field would arrive as. */
     const ctx = String(params.context || '');
-    let ctxTab = '';
-    try { ctxTab = String((JSON.parse(ctx) || {}).tab || ''); } catch (e) { ctxTab = ''; }
+    /* ONE parse, reused. `tab` is what the ingest call needs; the unannounced-bug notice below wants
+       the route and the captured JS errors out of the same snapshot. Parsing it twice would be two
+       places for the guard to go missing, and the guard is the whole point: a malformed context costs
+       the tab column and a few lines of an email, never the report. */
+    let ctxObj = {};
+    try { ctxObj = JSON.parse(ctx) || {}; } catch (e) { ctxObj = {}; }
+    const ctxTab = String(ctxObj.tab || '');
 
     const r = GXCore.gxIngestBug('sales', reporter, {
       title, priority, desc,
@@ -3606,11 +3611,134 @@ function reportBug_(params, reporter) {
       context:  ctx
     });
     if (!r || !r.ok) return jsonOut_({ ok: false, error: (r && r.error) || 'bug report was not saved' });
+
+    /* THE ROW IS DOWN AND NOBODY WAS TOLD — the one failure nothing anywhere observes.
+     *
+     * Since GX Core v310 Core's send is the only send: this app has no MailApp call of its own on the
+     * success path and does not want one, because two sends is the three-emails bug wearing a fix.
+     * But Core SWALLOWS its own mail failure on purpose — a filed report has succeeded, and mail must
+     * never be what stops it — so a bug can reach the board, the email can die, and the app stays
+     * silent. Correctly silent, by design, and nothing records it: the absence of an email is not an
+     * event anyone observes. v312 added `mailed` / `mail_error` / `mail_skipped` so a spoke can tell
+     * the three apart, and reading them is why this app is pinned to v315.
+     *
+     * READ THE POSITIVE FIELDS, NEVER THE ABSENCE OF `mailed`. gxIngestBug returns at its dedupe check
+     * ABOVE the send, so a repeat filed within three minutes carries NO mail field at all — and this
+     * app's submit retries transport flakes up to three times. Treating "no `mailed`" as a failure
+     * would turn one redirect chain into three of these emails, which is the bug this notice exists
+     * to prevent, re-created through the fix for it. Fields are ABSENT, not empty, when they do not
+     * apply; truthiness is the correct read, the same way `deduped` is read.
+     *
+     * THERE IS NO SECOND NOTICE FOR A REFUSED REPORT, deliberately. Leaderboard needs one because it
+     * answers ok:true regardless; this app returns the refusal to the browser and the shared form
+     * shows it, so the person who filed it already knows it did not save and can re-file. An email
+     * about a failure the reporter is looking at is noise. The case handled here is the opposite one:
+     * the reporter is correctly told it WORKED, and the notification is what went missing.
+     *
+     * `mail_skipped` is the one that reads as fine and is not — nobody configured to receive it plus a
+     * reporter with no address on file means nothing failed and nobody was mailed. Still silent.
+     *
+     * WHETHER THIS SEND CAN SUCCEED WHERE CORE'S FAILED is not guaranteed, and the honest answer is
+     * what it is for. A library call runs under the CALLING project, so gxIngestBug's send already
+     * spent THIS script's mail quota — an exhausted quota refuses this one too. What it does cover is
+     * everything else: a bad or missing recipient (all of `mail_skipped`), a transient failure, a
+     * Core-side config problem. */
+    const mailWhy = r.mail_error || r.mail_skipped;
+    if (mailWhy && bugMailOnce_(reporter, title, desc)) {
+      bugNotify_({
+        subject: '🔕 UNANNOUNCED Sales bug [' + priority + ']: ' + title,
+        lead: [
+          'THIS REPORT IS ON THE BUG BOARD — do NOT re-file it — but GX Core could not email',
+          'anyone about it, so this notice is standing in. The reporter got no receipt either.',
+          '',
+          'Bug id  : ' + String(r.id || '(none returned)'),
+          'Mail ' + (r.mail_error ? 'failed  : ' : 'skipped : ') + mailWhy,
+        ],
+        reporter: reporter,
+        priority: priority,
+        store:    params.appStore || '',
+        version:  params.appVer   || '',
+        tab:      ctxTab,
+        url:      String(ctxObj.url || ''),
+        errors:   Array.isArray(ctxObj.errors) ? ctxObj.errors : [],
+        desc:     desc,
+      });
+    }
+
     return jsonOut_({ ok: true });
   } catch(e) {
     return jsonOut_({ ok: false, error: e.message });
   }
 }
+
+/* The body of the unannounced-bug notice. Kept out of reportBug_ so the handler reads as what it is
+   — file the report, then check whether anyone was told — and so the send is wrapped in one place.
+   NON-FATAL BY CONSTRUCTION: the report is already on the board by the time this runs, so a throw in
+   here must never become the reporter's error. Mail is the enhancement; the row is the thing. */
+function bugNotify_(o) {
+  try {
+    const lines = o.lead.concat([
+      '',
+      'Reporter : ' + (o.reporter || '(not signed in)'),
+      'Priority : ' + (o.priority || 'medium'),
+      'Store    : ' + (o.store   || ''),
+      'Screen   : ' + (o.tab     || ''),
+      'Version  : ' + (o.version || ''),
+      'Route    : ' + (o.url     || ''),
+      'Time     : ' + Utilities.formatDate(new Date(), 'America/Los_Angeles', 'M/d/yy h:mm a'),
+    ]);
+    /* The captured JS errors, which are the reason `context` is forwarded at all — the `defer` bug was
+       filed three times before anyone diagnosed it, and its cause was a single boot ReferenceError
+       sitting in exactly this field. An email that omits them is the email that cost those three
+       reports. Absent when the page threw nothing, rather than a header standing over an empty list. */
+    if (o.errors.length) {
+      lines.push('', 'JS errors captured before submit (' + o.errors.length + '):');
+      o.errors.forEach(function (e) { lines.push('  - ' + String(e).slice(0, 200)); });
+    }
+    lines.push('', o.desc || '(no details provided)');
+    MailApp.sendEmail({ to: 'sky@greencrosscanna.com', subject: o.subject, body: lines.join('\n') });
+  } catch (mailErr) { /* non-fatal, on purpose — see above */ }
+}
+
+/* True the FIRST time a given report asks for the unannounced notice, false for a repeat inside three
+ * minutes. The window matches GX Core's own bug dedupe so the email and the board agree on what "the
+ * same report" means; a fourth minute is a person filing again because nothing happened, which should
+ * mail.
+ *
+ * THIS APP NEEDS THE MARK MORE THAN MOST. Its submit runs through `gasFetchJson(url, 3)`, because a
+ * bug reporter that dies on a transport flake is the one thing in the app you cannot report a bug
+ * about. Core's dedupe means those retries produce ONE row and carry no mail field, so they cannot
+ * reach this notice — but Core's ingest lock fails open by design, so two executions landing at once
+ * can each get a row and each see a dead send. Without the mark that is two copies of the email that
+ * exists precisely because nobody was told once.
+ *
+ * ONE NAMESPACE, because there is one notice: the refusal path returns its error to the browser and
+ * the shared form shows it. If a second notice is ever added it MUST get its own key — Leaderboard
+ * carries two whose instructions contradict each other ("re-file this" / "do not re-file this"), and
+ * a shared mark there would let the first suppress the second and leave the wrong one standing.
+ *
+ * FAILS OPEN on purpose: a cache or a lock that is unavailable must never be the reason a bug goes
+ * unread. Better a duplicate email than a silent one. Every failure inside falls through to sending. */
+function bugMailOnce_(reporter, title, desc) {
+  let lock = null;
+  try {
+    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,
+      String(reporter || '') + ' ' + String(title || '') + ' ' + String(desc || ''),
+      Utilities.Charset.UTF_8);
+    const key = 'bugmail:unannounced:' + Utilities.base64EncodeWebSafe(digest);
+    lock = LockService.getScriptLock();
+    try { lock.waitLock(5000); } catch (e) { lock = null; }   // busy -> fall through and send
+    const cache = CacheService.getScriptCache();
+    if (cache.get(key)) return false;
+    cache.put(key, '1', 180);   // seconds; 3 min, the same window as gxIngestBug's dedupe
+    return true;
+  } catch (e) {
+    return true;
+  } finally {
+    if (lock) { try { lock.releaseLock(); } catch (e) {} }
+  }
+}
+
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 //  SMART BUDGET — proposes a 12-month expense budget from actual QuickBooks history

@@ -27,12 +27,23 @@
  *     said the gate had gone dark. Both of us had measured with the agent wrapper rather than with
  *     the grep the hook actually runs.
  *
- * SO THE INVARIANT IS ABOUT LUCK, NOT ABOUT DAMAGE DONE. Position decided the outcome and nothing
- * chose the position. Demonstrated below: the same NUL at byte 22 makes /usr/bin/grep call the file
- * binary; at byte ~260000 it does not. Had these two bytes landed in the first block — as they easily
- * could have, that key being one function among hundreds — the hook really would have gone silent
- * across every check it runs — fixtures, armed writes, localhost URLs, the dev-only marker — and
- * "the checks passed" would have been indistinguishable from "the checks could not report".
+ * SO THE INVARIANT IS ABOUT LUCK, NOT ABOUT DAMAGE DONE. Position decides whether /usr/bin/grep
+ * calls the file binary — demonstrated below: the same NUL at byte 22 does, at byte ~260000 it does
+ * not — and nothing chose the position.
+ *
+ * WHAT AN EARLY NUL WOULD ACTUALLY HAVE COST, MEASURED — and this corrects a claim I made in the
+ * first version of this header. I wrote that the hook "would have gone silent across every check it
+ * runs". IT WOULD NOT, and core-admin measured that before I did. Re-measured here: real
+ * gx-preflight.sh, NUL at byte 1 of the real proxy, a genuine `USE_FIXTURES = true` and a real
+ * `debug`+`ger;` appended —
+ *
+ *     leftover present -> both checks FIRED, "Binary file dutchie_proxy.gs matches", PUSH BLOCKED
+ *     clean file       -> passed, no false positive
+ *
+ * `hits` stays non-empty because grep still answers, and the comment filter does not strip that
+ * line, so a hard check still sets FAIL. What an early NUL destroys is the REPORT: a filename with
+ * no line number and no offending text, on a 240KB proxy. A blocked push nobody can act on is a real
+ * defect — just not the silent gate I claimed it was.
  *
  * THE ESCAPE IS THE FIX, NOT THE DELIMITER. The escaped form yields the identical runtime string —
  * verified by executing bugMailOnce_ and reading the digest input back, a real NUL at both joins — so

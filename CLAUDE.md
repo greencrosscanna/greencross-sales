@@ -553,9 +553,17 @@ literal is legal, and the escaped form produces a byte-identical string (verifie
   file from its **first block only**. These NULs were at ~196KB. **Measured, by running the real gate
   against the real file with a genuine `debugger;` and a real localhost URL appended: it caught both,
   with line numbers, and printed PUSH BLOCKED.**
-- **The lesson is that position decided it and nothing chose the position.** The same NUL at byte 22
-  does blind `/usr/bin/grep`; at byte 260000 it does not. Two bytes landing 196KB earlier would have
-  silenced every check in the hook.
+- **Position decided what the gate could SAY, not whether it fired.** The same NUL at byte 22 does
+  make `/usr/bin/grep` call the file binary; at byte 260000 it does not. *Corrected 2026-09-09, and
+  the correction is mine to own: this bullet first claimed two bytes landing 196KB earlier "would
+  have silenced every check in the hook".* **That is false, and core-admin measured it before I
+  did.** Re-measured here against the real `gx-preflight.sh` with a NUL at byte 1 and a genuine
+  `USE_FIXTURES = true` plus `debugger;` in the file: both checks still **fired** and the push was
+  still **BLOCKED** — `hits` is non-empty because grep answers `Binary file dutchie_proxy.gs
+  matches`, which the comment filter does not strip. A clean file with the same early NUL still
+  passed, so there is no false positive either. **What is destroyed is the REPORT**: a filename with
+  no line number and no offending text, on a 240KB proxy. That is a blocked push nobody can act on —
+  a real defect, and a different one from the silent gate I claimed.
 - **Measure a tooling claim with the tool that actually runs.** Both wrong readings came from testing
   with the agent's grep rather than the hook's. That is the same error as reading `appsscript.json`
   to learn what a deployed app is running.

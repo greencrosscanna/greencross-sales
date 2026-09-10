@@ -137,5 +137,50 @@ if (!fs.existsSync('/usr/bin/grep')) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+/* THE RULE ABOVE, ENFORCED RATHER THAN ASSERTED IN PROSE.
+ *
+ * "Describe the gate's patterns, never spell them" was a comment until 30ae8bd, and a comment did not
+ * stop this very file breaking it — twice, the second time written AFTER the rule was explicit, by
+ * the session that had just articulated it to someone else. That is the argument for code.
+ *
+ * THE PATTERNS ARE READ OUT OF gx-preflight.sh, NEVER COPIED. A copied list would be the violation
+ * itself — the literals would be sitting right here — and would drift from the rules actually
+ * enforced, which is the same failure as a test carrying its own copy of a function. Adopted from
+ * Leaderboard, who made it code first after this file supplied the fourth instance.
+ *
+ * COMMENT-STRIPPING IS DELIBERATELY NOT APPLIED. The gate drops comment lines for most rules, so a
+ * literal in prose can survive purely because of that — which is luck, and breaks the day a rule is
+ * declared keep-comments, as the dev-only one already is. This checks the raw text.
+ */
+console.log('\nthis file must not spell out any pattern gx-preflight.sh greps for');
+{
+  const gate = fs.readFileSync(path.join(ROOT, 'gx-preflight.sh'), 'utf8');
+  const self = fs.readFileSync(__filename, 'utf8');
+  const q = String.fromCharCode(39);
+  const decl = new RegExp('^flag\\s+\\w+\\s+"[^"]*"\\s*\\\\\\s*\\n\\s*' + q + '([^' + q + ']+)' + q, 'gm');
+  const raw = [...gate.matchAll(decl)].map((m) => m[1]);
+
+  /* VACUITY GUARD. If the parse stops matching — gx-preflight.sh is synced from gx-theme and its
+     shape is not ours — this block would otherwise report a cheerful zero assertions over an empty
+     list, which is the false green this whole suite is about. It exists because of the
+     `catch { return false }` bug found in the skip path above; Leaderboard's equivalent fired on its
+     first run. */
+  ok('parsed the gate\'s patterns out of gx-preflight.sh (' + raw.length + ')', raw.length >= 4);
+
+  // POSIX bracket classes are not JS. Translate the ones actually used and REFUSE the rest — an
+  // untranslated class silently matches nothing, which reads as "no violation found".
+  const POSIX = { '[:space:]': '\\s', '[:alpha:]': 'A-Za-z', '[:digit:]': '0-9', '[:alnum:]': 'A-Za-z0-9' };
+  for (const p of raw) {
+    let js = p;
+    for (const [k, v] of Object.entries(POSIX)) js = js.split(k).join(v);
+    const leftover = /\[:[a-z]+:\]/.exec(js);
+    if (leftover) { ok('unhandled POSIX class ' + leftover[0] + ' — translate it, do not skip it', false); continue; }
+    let re;
+    try { re = new RegExp(js, 'm'); }
+    catch (e) { ok('gate pattern is translatable to a JS regex: ' + p, false); continue; }
+    ok('does not spell out ' + JSON.stringify(p), !re.test(self));
+  }
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

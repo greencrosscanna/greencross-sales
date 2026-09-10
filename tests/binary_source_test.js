@@ -174,7 +174,15 @@ console.log('\nthis file must not spell out any pattern gx-preflight.sh greps fo
     let js = p;
     for (const [k, v] of Object.entries(POSIX)) js = js.split(k).join(v);
     const leftover = /\[:[a-z]+:\]/.exec(js);
-    if (leftover) { ok('unhandled POSIX class ' + leftover[0] + ' — translate it, do not skip it', false); continue; }
+    if (leftover) {
+      /* NAME THE PATTERN, not just the class. Two rules carry [:space:], so a message that says
+         only the class prints the same line twice and tells you nothing about which to fix — the
+         same defect as the gate reporting a filename with no line number on a 240KB proxy. A
+         failure you cannot act on is barely better than one you never see. */
+      ok('unhandled POSIX class ' + leftover[0] + ' in ' + JSON.stringify(p)
+         + ' — translate it, do not skip it', false);
+      continue;
+    }
     let re;
     try { re = new RegExp(js, 'm'); }
     catch (e) { ok('gate pattern is translatable to a JS regex: ' + p, false); continue; }

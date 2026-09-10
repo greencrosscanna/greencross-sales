@@ -93,7 +93,16 @@ for (const f of files) {
  * protects the repo; this block only justifies it.
  */
 console.log('\nwhy position must not be relied on — measured with the hook\'s own grep');
-{
+if (!fs.existsSync('/usr/bin/grep')) {
+  /* SKIP, NEVER SUBSTITUTE. Falling back to whatever `grep` resolves to would run this against the
+     agent's ugrep wrapper — and measuring with the wrong grep is the ENTIRE error this block exists
+     to document, made three times in one evening by three different sessions. A skip leaves the
+     invariant above standing on its own, which is what actually protects the repo; a substitution
+     would print a green line about a tool nobody asked about. Caught by Leaderboard, who added it to
+     their copy first: the original `catch (e) { return false; }` made the first assertion PASS on a
+     missing binary — a false green inside the false-green test. */
+  console.log('  SKIP no /usr/bin/grep on this host — the invariant above is unaffected');
+} else {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gx-nul-'));
   const filler = Buffer.from('// filler\n'.repeat(26000));       // ~260KB, well past any first block
   // A neutral token on purpose: this file is itself grepped by gx-preflight.sh, and planting a

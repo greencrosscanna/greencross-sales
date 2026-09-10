@@ -477,6 +477,57 @@ them; the server-side 90s intraday cache is working; and River was unremarkable 
   path must reach it, including "GX Core has no periods for this range". Miss one and that view
   shimmers forever, which is worse than the flicker it replaced.
 
+## A filed bug whose email dies is the failure nothing observes (v315 pin, 2026-09-09)
+
+**Since GX Core v310, Core's send is the only send** — this app has no `MailApp` call of its own on
+the success path and must not grow one, because two sends is the three-emails bug wearing a fix. But
+`gxIngestBug` **swallows its own mail failure on purpose**: a filed report has succeeded, and mail
+must never be what stops it. So a bug could reach the board, the email could die, and the app stayed
+silent — correctly, by design, with nothing anywhere recording it. The absence of an email is not an
+event anyone observes.
+
+v312 added `mailed` / `mail_error` / `mail_skipped` so a spoke can tell the three apart, and reading
+them is why this app is pinned to **v315**. `reportBug_` now sends its own notice on that path,
+naming the bug id and saying explicitly **not** to re-file it.
+
+- **READ THE POSITIVE FIELDS. NEVER THE ABSENCE OF `mailed`.** `gxIngestBug` returns at its dedupe
+  check **above** its send, so a repeat filed inside three minutes carries **no mail field at all** —
+  and this app's submit retries transport flakes up to three times (`gasFetchJson(url, 3)`, because a
+  bug reporter that dies on a flake is the one thing you cannot report a bug about). `!r.mailed`
+  turns one redirect chain into three copies of the very email that exists because nobody was told
+  once. Fields are **absent, not empty**, when they do not apply; truthiness is the correct read, the
+  same way `deduped` is read. Verified by mutation: that one expression fails 3 assertions.
+- **There is deliberately NO notice for a REFUSED report, and this app is the reason.** Leaderboard
+  carries one because it answers `ok:true` regardless; here `reportBug_` returns the refusal to the
+  browser and the shared form shows it (`gx-bugreport.js` treats a resolved `{ok:false}` as failure),
+  so the person who filed it already knows and can re-file. An email about a failure the reporter is
+  looking at is noise. **A second notice would need its own `bugMailOnce_` key** — the two say
+  opposite things ("re-file this" / "do not re-file this"), and a shared mark lets the first suppress
+  the second and leaves the wrong instruction standing as the only word on it.
+- **`mail_skipped` is the one that reads as fine and is not.** Nobody configured to receive it plus a
+  reporter with no address on file means nothing failed and nobody was mailed. Still a silent report.
+- **`bugMailOnce_` fails OPEN.** A cache or lock that is unavailable must never be the reason a bug
+  goes unread — better a duplicate email than a silent one. Every failure inside falls through to
+  sending. It exists because Core's ingest lock also fails open, so two executions landing at once
+  can each get a row and each see a dead send.
+- **Whether this send can succeed where Core's failed is not guaranteed**, and the honest answer is
+  what it is for. A library call runs under the **calling** project, so `gxIngestBug`'s send already
+  spent this script's mail quota — an exhausted quota refuses this one too. What it does cover is a
+  bad or missing recipient (all of `mail_skipped`), a transient failure, and a Core-side config
+  problem.
+- **The notice carries the captured JS errors**, which is the whole reason `context` is forwarded.
+  The `defer` bug was filed three times before anyone diagnosed it and its cause was a single boot
+  `ReferenceError` sitting in exactly that field.
+- **The `script.send_mail` scope was already declared** — this needed no manifest change beyond the
+  pin.
+- `tests/bug_mail_fallback_test.js` — 44 assertions, executes the shipped `reportBug_` /
+  `bugNotify_` / `bugMailOnce_`.
+
+**Not verified end-to-end on the live deployment**, and deliberately not: exercising it means filing
+a real bug on the board and sending a real email. What was checked live is that the deployed script
+compiles and serves (`libversion` → 315) and that the auth gate still sits above this code.
+
+
 ## Sync with the brain — run `/gxbrain` (or say "brain sync")
 
 This app is on the shared brain. **`/gxbrain`** loads the shared rules and reconciles this chat with GX Core

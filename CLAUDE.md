@@ -571,6 +571,31 @@ literal is legal, and the escaped form produces a byte-identical string (verifie
   mechanism so the invariant reads as a rule rather than a superstition. The suite-wide fix — `grep
   -a` in `gx-preflight.sh` — is gx-theme's and has been asked for.
 
+### MUTATE A GUARD; YOU CANNOT REVIEW YOUR WAY OUT OF A CHECK THAT CANNOT FAIL
+
+The most durable thing found on 2026-09-09, and it is not about NUL bytes. `tests/binary_source_test.js`
+shipped **three** assertions that passed while being **incapable of failing** — and every one was
+written while its author was actively thinking about that exact failure mode:
+
+1. `n === -1 || !console.log(...)` — `console.log` returns `undefined`, so the condition was always
+   true. It printed the offending byte offset and reported `0 failed` in the same breath.
+2. The mechanism check resolved `/usr/bin/grep` through `catch (e) { return false; }`, so on a host
+   without that binary the assertion passed for the wrong reason. It skips and says so now.
+3. Two of the gate's patterns compiled to JS regexes matching **nothing** (`[[:space:]]` is POSIX and
+   is not JS), so the two rules actually at risk were checked by regexes that could never match.
+
+**A check that cannot fail looks exactly like a check that passed.** Reading it does not distinguish
+them; only breaking the thing it guards does. So: **verify a guard by mutation, never by a green
+run.** Break the source it protects, break its own table, force its dependency absent — and require
+the failure to *name what broke*, because a red line nobody can act on is the same defect one level
+up (the gate's own `Binary file … matches`, with no line number, on a 240KB proxy).
+
+This is the older `verified to fail against the pre-fix source` rule, sharpened: it is not enough for
+the SUITE to fail somewhere. **The specific assertion has to be shown failing for the specific
+reason.** Leaderboard reached the same conclusion independently the same evening, with three of its
+own in one file. The lesson is a fact about the defect, not about carelessness — being careful is
+what all six of these were.
+
 
 ## Sync with the brain — run `/gxbrain` (or say "brain sync")
 

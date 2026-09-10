@@ -22,7 +22,7 @@
  *     resolves to /usr/bin/grep — BSD grep, which classifies a file from its FIRST BLOCK only. These
  *     NULs sat at ~196KB, far past that window, so the gate read the file as ordinary text. VERIFIED
  *     by running the real gx-preflight.sh against the real NUL-bearing backend with a genuine
- *     `debugger;` and a real localhost URL appended: it caught BOTH, with correct line numbers, and
+ *     dev leftover and a real loopback URL appended: it caught BOTH, with correct line numbers, and
  *     printed PUSH BLOCKED. An earlier read of this incident — mine and a peer's, independently —
  *     said the gate had gone dark. Both of us had measured with the agent wrapper rather than with
  *     the grep the hook actually runs.
@@ -34,8 +34,8 @@
  * WHAT AN EARLY NUL WOULD ACTUALLY HAVE COST, MEASURED — and this corrects a claim I made in the
  * first version of this header. I wrote that the hook "would have gone silent across every check it
  * runs". IT WOULD NOT, and core-admin measured that before I did. Re-measured here: real
- * gx-preflight.sh, NUL at byte 1 of the real proxy, a genuine `USE_FIXTURES = true` and a real
- * `debug`+`ger;` appended —
+ * gx-preflight.sh, NUL at byte 1 of the real proxy, a genuine fixtures-on assignment and a real
+ * breakpoint statement appended —
  *
  *     leftover present -> both checks FIRED, "Binary file dutchie_proxy.gs matches", PUSH BLOCKED
  *     clean file       -> passed, no false positive
@@ -50,6 +50,19 @@
  * the cache key's collision resistance is unchanged. Do not "simplify" the escape back to a literal
  * byte, and do not switch the delimiter to a printable character on this test's account: a printable
  * delimiter is a real, if small, collision risk in a key built from user-supplied text.
+ *
+ * DESCRIBE THE GATE'S PATTERNS, NEVER SPELL THEM. gx-preflight.sh greps tests/*.js too, so a file
+ * that explains the gate is a file the gate reads. THREE pushes were blocked this way in one evening,
+ * across two repos and three different rules: Leaderboard's first push named the dev-only tag in
+ * prose; this file's probe fixture carried a real breakpoint statement; and Leaderboard's comment
+ * EXPLAINING that fix quoted the fixtures rule verbatim, which the fixtures rule then matched. Two of
+ * the three were written by sessions that had just corrected someone else for the same class of
+ * mistake.
+ *
+ * The prose above used to spell two of the patterns out. It passed only because those two rules drop
+ * comment lines — luck of exactly the kind this file exists to argue against, and it would break the
+ * day either rule is declared keep-comments, as the dev-only one already is. Nothing here now matches
+ * any gate pattern literally; the probe token is neutral for the same reason.
  *
  * The suite-wide half belongs in gx-theme: `grep -a` in gx-preflight.sh makes the gate immune by
  * position rather than by luck. That is core-admin's file and it has been asked for. This test is the

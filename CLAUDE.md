@@ -506,6 +506,15 @@ naming the bug id and saying explicitly **not** to re-file it.
   the second and leaves the wrong instruction standing as the only word on it.
 - **`mail_skipped` is the one that reads as fine and is not.** Nobody configured to receive it plus a
   reporter with no address on file means nothing failed and nobody was mailed. Still a silent report.
+
+  **In practice only `mail_error` can fire today, and that is a CONFIG fact, not a code one.**
+  `gxBugWatchEmail_` falls back to a hardcoded default when `cfg.bugWatchEmail` is unset — and it is
+  unset — returning `''` only for the literal string `off`. So there is always a recipient and
+  `mail_skipped` is currently unreachable. **Do not delete the branch on that basis.** One
+  `set_config` writing `off` makes it live overnight, from a change nobody would connect to bug mail,
+  and the branch costs a `||`. Read from `gx_core.gs` at HEAD (established by spiff, re-checked by
+  Leaderboard and crew); this app runs the v315 snapshot, so treat it as current behavior rather than
+  a guarantee about the pin.
 - **`bugMailOnce_` fails OPEN.** A cache or lock that is unavailable must never be the reason a bug
   goes unread — better a duplicate email than a silent one. Every failure inside falls through to
   sending. It exists because Core's ingest lock also fails open, so two executions landing at once

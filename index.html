@@ -1395,7 +1395,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.584';
+const APP_VERSION = 'v2.585';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2955,6 +2955,68 @@ async function fetchStoresMeta() {
 }
 
 let _loadAllStoresInFlight = false;
+
+/* Stores whose SETTLED month landed but whose TODAY figure did not.
+ *
+ * Not an error state. The settled half and the live half travel different roads — the settled half
+ * is a GX Core library call, the live half an /exec round trip — and only the second one stalls.
+ * A store in here has a correct month that is short by today, which is a very different thing from
+ * a store that failed, and has to read differently on screen. */
+let _todayPending = new Set();
+
+function round2_(n) { return Math.round(Number(n || 0) * 100) / 100; }
+
+/* Fold the two halves of one store-month back into the single shape the rest of the app reads.
+ *
+ * TOTALS ADD. DERIVED FIGURES DO NOT — aov and margin are recomputed from the merged totals,
+ * because the sum of two averages is not an average and the sum of two margins is not a margin.
+ * That is the one mistake in here that would produce a plausible, wrong number rather than an
+ * obvious break. */
+function mergeStorePhases_(settled, live) {
+  if (!settled && !live) return null;
+  if (!settled) return live;
+  if (!live)    return settled;
+  const A = settled, B = live;
+  const sum    = k => Number(A[k] || 0) + Number(B[k] || 0);
+  const net    = round2_(sum('netSales'));
+  const cost   = round2_(sum('cost'));
+  const orders = sum('orders');
+
+  /* daily — keyed by DATE, not concatenated. The halves are disjoint by construction (settled ends
+   * yesterday, live is today only), so this is belt-and-braces: if the server's idea of "settled"
+   * ever reaches today, a concat would silently double that day's sales. */
+  const dailyMap = {};
+  for (const d of (A.daily || [])) if (d && d.date) dailyMap[d.date] = d;
+  for (const d of (B.daily || [])) if (d && d.date) dailyMap[d.date] = d;
+
+  /* weekly — SUMMED per label, and this is the opposite rule to daily on purpose. Today sits in the
+   * same ISO week as the settled days before it, so the two halves genuinely overlap here.
+   * Replacing instead of adding drops Monday-to-yesterday from the current week every time. */
+  const weeklyMap = {};
+  for (const w of (A.weekly || [])) if (w && w.label) weeklyMap[w.label] = (weeklyMap[w.label] || 0) + Number(w.amount || 0);
+  for (const w of (B.weekly || [])) if (w && w.label) weeklyMap[w.label] = (weeklyMap[w.label] || 0) + Number(w.amount || 0);
+
+  return {
+    store:      A.store || B.store,
+    orders,
+    netSales:   net,
+    grossSales: round2_(sum('grossSales')),
+    discounts:  round2_(sum('discounts')),
+    cost,
+    tax:        round2_(sum('tax')),
+    profit:     round2_(net - cost),
+    aov:        orders > 0 ? round2_(net / orders) : 0,
+    margin:     net    > 0 ? Math.round((net - cost) / net * 10000) / 100 : 0,
+    weekly:     Object.keys(weeklyMap)
+                  .sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)))
+                  .map(l => ({ label: l, amount: weeklyMap[l] })),
+    topProducts: (B.topProducts && B.topProducts.length) ? B.topProducts : (A.topProducts || []),
+    daily:      Object.keys(dailyMap).sort().map(k => dailyMap[k]),
+    cacheRows:  Number(A.cacheRows  || 0),
+    liveOrders: Number(B.liveOrders || 0),
+    phase:      'both',
+  };
+}
 async function loadAllStores() {
   if (_loadAllStoresInFlight) return;          // prevent double-tap race
   _loadAllStoresInFlight = true;
@@ -3016,43 +3078,110 @@ async function loadAllStores() {
   const maxMo   = activeYear < curYear ? 12 : curMo; // all 12 for past years
 
   // Helper: fetch one month for one store, cache-aware. Retries once on transient failure.
+  /* ONE PHASE OF ONE STORE-MONTH. The caller decides which halves to ask for. */
+  async function fetchPhase(store, from, to, phase) {
+    const url = `${proxyUrl}?store=${encodeURIComponent(store.name)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+              + (phase ? `&phase=${encodeURIComponent(phase)}` : '')
+              + `&token=${encodeURIComponent(getToken())}${serverBypassParam()}`;
+    // gasFetchJson, not a bare fetch: it BOUNDS the wait and retries the transport. The bare
+    // version had no timeout, so a store whose /exec bounced sat unresolved — no error, no state
+    // change, just a row shimmering while the other five filled in. Reported by Sky on v2.560 as
+    // "5 stores loaded quickly, Portland is stalling"; measured the same hour, Portland's data was
+    // healthy on both GX Core paths and its live Dutchie pull was FASTER than Center's, so the
+    // stall was the client waiting on a hop that never came back, not this store being slow.
+    // 2 attempts at 15s, not 3 at 30s, and the reason is that THE 60-SECOND POLL IS ALREADY A
+    // RETRY. A long in-request chain holds _loadAllStoresInFlight, which blocks the poll that
+    // would have fixed it — so failing fast and letting the next poll try again recovers sooner
+    // than retrying harder here. Worst case ~31s, comfortably inside one poll interval.
+    const data = await gasFetchJson(url, 2, 15000);
+    if (data.error) {
+      if (data.error === 'Auth required') { salesLogout(); throw new Error(data.error); }
+      throw new Error(data.error);
+    }
+    return data;
+  }
+
+  /* ASK FOR TODAY SEPARATELY FROM THE MONTH BEHIND IT.
+   *
+   * The settled days come back through GXCore.getSalesDaily — a library call, in-process, with no
+   * /exec hop in it anywhere. Today's figure comes back through an /exec round trip to GX Core, and
+   * that hop intermittently hangs ~32 seconds before answering 404. Measured on the live app
+   * 2026-09-11, spaced 20s apart so the load was not self-inflicted: three of six stores blew the
+   * client's 15s x 2 budget. In the same window Sales' own /exec answered 25 of 25 in about two
+   * seconds, and its library-backed routes never faltered — so the two halves genuinely do have
+   * different reliability, and bundling them hands the reliable half the unreliable half's odds.
+   *
+   * Bundled, a Google-side hiccup on today's number threw away the whole month for that store and
+   * the company total silently read short until the next poll. That is the River Rd shape: a
+   * per-store failure degrading into a smaller number rather than an error.
+   *
+   * Both halves are fired AT ONCE, not in sequence. Waiting for settled before asking for today
+   * would add its latency to today's for no gain; they are independent requests.
+   *
+   * A range that does not reach today has no live half at all, so it stays a single request and an
+   * unchanged contract — which is also what every past month, the YTD walk and the compare-period
+   * fetch keep using. */
   async function fetchMonthData(store, year, month, _retry) {
     const cached = readSalesCache(store.name, year, month);
-    if (cached) { stateMap[store.name] = 'ok'; return cached; }
+    // Only complete months are ever written, so a cache hit is never today-pending.
+    if (cached) { stateMap[store.name] = 'ok'; _todayPending.delete(store.name); return cached; }
     const { from, to } = monthRange(month, year);
-    const url = `${proxyUrl}?store=${encodeURIComponent(store.name)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&token=${encodeURIComponent(getToken())}${serverBypassParam()}`;
-    try {
-      // gasFetchJson, not a bare fetch: it BOUNDS the wait and retries the transport. The bare
-      // version had no timeout, so a store whose /exec bounced sat unresolved — no error, no state
-      // change, just a row shimmering while the other five filled in. Reported by Sky on v2.560 as
-      // "5 stores loaded quickly, Portland is stalling"; measured the same hour, Portland's data was
-      // healthy on both GX Core paths and its live Dutchie pull was FASTER than Center's, so the
-      // stall was the client waiting on a hop that never came back, not this store being slow.
-      // 2 attempts at 15s, not 3 at 30s, and the reason is that THE 60-SECOND POLL IS ALREADY A
-      // RETRY. A long in-request chain holds _loadAllStoresInFlight, which blocks the poll that
-      // would have fixed it — so failing fast and letting the next poll try again recovers sooner
-      // than retrying harder here. Worst case ~31s, comfortably inside one poll interval. A store
-      // that has loaded once now keeps its numbers across a failed poll (see _liveDataKey), so a
-      // transient miss is invisible after the first successful load rather than a blanked row.
-      const data = await gasFetchJson(url, 2, 15000);
-      if (data.error) {
-        if (data.error === 'Auth required') { salesLogout(); throw new Error(data.error); }
-        throw new Error(data.error);
+    const reachesToday = String(to).slice(0, 10) >= laDay();
+
+    if (!reachesToday) {
+      try {
+        const data = await fetchPhase(store, from, to, '');
+        writeSalesCache(store.name, year, month, data);
+        stateMap[store.name] = 'ok';
+        return data;
+      } catch (e) {
+        // gasFetchJson already retried the transport. This outer retry stays for the other failure
+        // it cannot see — a proxy that answered with a real {error} — and is deliberately not
+        // stacked on top of a timeout, so the worst case is bounded rather than multiplied.
+        if (!_retry && e.message !== 'Auth required' && !/timed out after/.test(e.message)) {
+          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+          return fetchMonthData(store, year, month, true);
+        }
+        console.warn('[load] ' + store.name + ' failed:', e.message);
+        throw e;
       }
-      writeSalesCache(store.name, year, month, data);
-      stateMap[store.name] = 'ok';
-      return data;
-    } catch(e) {
-      // gasFetchJson already retried the transport three times. This outer retry stays for the other
-      // failure it cannot see — a proxy that answered with a real {error} — and is deliberately not
-      // stacked on top of a timeout, so the worst case is bounded rather than multiplied.
+    }
+
+    const [sRes, lRes] = await Promise.allSettled([
+      fetchPhase(store, from, to, 'settled'),
+      fetchPhase(store, from, to, 'live'),
+    ]);
+
+    /* THE SETTLED HALF IS THE STORE. If it failed there is no month to show, and the store errors
+     * exactly as it did before this split existed — showing today's few hundred dollars on its own,
+     * labeled as a month, would be a far worse answer than an honest failure. */
+    if (sRes.status !== 'fulfilled') {
+      const e = sRes.reason || new Error('settled fetch failed');
       if (!_retry && e.message !== 'Auth required' && !/timed out after/.test(e.message)) {
         await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
         return fetchMonthData(store, year, month, true);
       }
-      console.warn('[load] ' + store.name + ' failed:', e.message);
+      // 'err' is the stronger statement; a store that failed outright is not "today pending" too.
+      _todayPending.delete(store.name);
+      console.warn('[load] ' + store.name + ' settled failed:', e.message);
       throw e;
     }
+
+    const merged = mergeStorePhases_(sRes.value, lRes.status === 'fulfilled' ? lRes.value : null);
+    stateMap[store.name] = 'ok';
+
+    if (lRes.status === 'fulfilled') {
+      _todayPending.delete(store.name);
+      // Only a COMPLETE month is cached. A settled-only answer written here would be served back
+      // for the whole TTL, so a single stalled hop would cost today's sales for ten minutes rather
+      // than until the next poll — turning a self-healing miss into a sticky one.
+      writeSalesCache(store.name, year, month, merged);
+    } else {
+      _todayPending.add(store.name);
+      console.warn('[load] ' + store.name + ' today pending:',
+                   (lRes.reason && lRes.reason.message) || 'live fetch failed');
+    }
+    return merged;
   }
 
   if (activeMonth === 0) {
@@ -3121,7 +3250,16 @@ async function loadAllStores() {
     openSettings(); // surface the error
   } else {
     const yearLabel = activeYear !== new Date().getFullYear() ? ` · ${activeYear}` : '';
-    pill('green', `Live · ${ok}/${STORES.length} stores${yearLabel} · ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`);
+    /* A STORE MISSING ONLY TODAY STILL COUNTS AS LOADED, SO THE COUNT ALONE WOULD SAY 6/6.
+     *
+     * That is the exact failure this whole change exists to stop being invisible: a total quietly
+     * short one store's day, reported as complete. The count is honest about the month and has to
+     * be said separately from today. Amber, because the figure on screen is understated until
+     * those stores land — the next poll usually fixes it. */
+    const pend = STORES.map(s => s.name).filter(n => _todayPending.has(n));
+    const todayNote = pend.length ? ` · today pending: ${pend.join(', ')}` : '';
+    pill(pend.length ? 'amber' : 'green',
+         `Live · ${ok}/${STORES.length} stores${yearLabel}${todayNote} · ${new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`);
     if (err > 0) showErr('setup-err', `${err} store(s) failed to load — check the proxy logs.`);
     else closeSettings();
   }
@@ -4059,7 +4197,20 @@ let _lastRenderedSection = null;
  * goal shimmer): shimmer means "we have nothing yet" and belongs to the FIRST load. The empty state
  * survives for the case it was written for — no load running and nothing on screen. */
 function salesPending() {
-  return _loadAllStoresInFlight && Object.keys(liveData).length === 0;
+  if (_loadAllStoresInFlight && Object.keys(liveData).length === 0) return true;
+  /* A TODAY-SCOPED VIEW WHOSE TODAY FIGURE HAS NOT ARRIVED FOR A SINGLE STORE.
+   *
+   * Today's number travels the one hop that stalls, so the settled month can be complete while
+   * today is still missing everywhere. On a day view that means the hero would read a confident $0
+   * next to a live dot — 0 for want of asking, which this app already refuses to render as a
+   * measurement. Shimmer says "not yet", which is what is true.
+   *
+   * Deliberately ALL stores, not any. A view holding five stores' today and missing one is short,
+   * not empty, and blanking it would hide five real figures; that case paints and the status pill
+   * names who is missing — the same contract a failed store has always had. */
+  const loaded = Object.keys(liveData).length;
+  return !!activeDay && activeDay === laDay()
+      && loaded > 0 && _todayPending.size >= loaded;
 }
 
 function render() {

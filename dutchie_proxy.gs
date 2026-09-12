@@ -1130,7 +1130,7 @@ function doGet(e) {
   }
   if (!gate.ok) return jsonOut_({ error: 'Unknown store: ' + store });
 
-  return getStoreSales_(store, from, to, params.nocache);
+  return getStoreSales_(store, from, to, params.nocache, params.phase);
 }
 
 function doPost(e) {
@@ -1149,8 +1149,30 @@ function doPost(e) {
 // Settled days (yesterday and earlier) come from GXCore.getSalesDaily — fast,
 // no Dutchie quota.  Today (intraday) still uses a live Dutchie transaction pull.
 
-function getStoreSales_(store, from, to, nocache) {
+function getStoreSales_(store, from, to, nocache, phase) {
   try {
+    /* PHASE SPLITS THE FAST HALF OFF FROM THE FRAGILE ONE.
+     *
+     * The settled days reach us through GXCore.getSalesDaily — a LIBRARY call, in-process, with no
+     * /exec hop anywhere in it. Measured 2026-09-11 it answers from cache in 57ms. Today's figure
+     * reaches us through gxDutchieGet_, which is an /exec round trip to GX Core, and that hop
+     * intermittently hangs ~32s before returning a 404. Measured the same night, spaced 20s apart so
+     * the load was not self-inflicted: three of six stores blew the client's 15s x 2 budget, one on a
+     * 32.3s 404 whose immediate retry succeeded in 2.5s, two dead at 60s.
+     *
+     * Bundled, the 57ms data waits on the 32s data and the browser then throws away BOTH — so a
+     * Google-side hiccup on today's number costs the reader the whole month for that store, and the
+     * company total silently reads short until the next poll. That is the River Rd failure shape: a
+     * per-store failure degrading into a smaller number rather than an error.
+     *
+     *   phase=settled  yesterday and earlier, no Dutchie call at all, cannot hit the bad hop
+     *   phase=live     today only
+     *   (absent)       both, exactly as before — loadprobe and pnlprobe still ask this way
+     *
+     * The default stays BOTH deliberately: every existing caller keeps its current contract, and the
+     * split is opt-in from the client. */
+    const wantSettled = phase !== 'live';
+    const wantLive    = phase !== 'settled';
     const todayPT  = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
     const fromDate = from.slice(0, 10);
     const toDate   = to.slice(0, 10);
@@ -1158,7 +1180,7 @@ function getStoreSales_(store, from, to, nocache) {
     // Settled: [fromDate .. min(toDate, yesterday)]
     const settledTo = toDate < todayPT ? toDate : dayBefore_(todayPT);
     let cacheRows = [];
-    if (fromDate <= settledTo) {
+    if (wantSettled && fromDate <= settledTo) {
       // Version prefix (v3): bumped 2026-08-15 to bust stale entries after GXCore backfill (8/13–8/14 rows
       // were missing; proxy had cached the incomplete result for up to 1h). CacheService has no clear-all.
       const gasCacheKey = 'sdaily_v4_' + store + '_' + fromDate + '_' + settledTo;
@@ -1184,7 +1206,7 @@ function getStoreSales_(store, from, to, nocache) {
 
     // Live: today only (if the requested range includes today)
     const _t2 = Date.now();
-    const liveResult = toDate >= todayPT ? dutchieTodayFetch_(store, todayPT, to, nocache) : null;
+    const liveResult = (wantLive && toDate >= todayPT) ? dutchieTodayFetch_(store, todayPT, to, nocache) : null;
     if (liveResult) probeMark_('live_today', Date.now() - _t2, { orders: liveResult.orders });
 
     let net = 0, gros = 0, disc = 0, cogs = 0, tx = 0, ord = 0;
@@ -1248,6 +1270,10 @@ function getStoreSales_(store, from, to, nocache) {
         .map(([date, d]) => ({ date, netSales: d.netSales, grossSales: d.grossSales, orders: d.orders, discounts: d.discounts, cogs: d.cogs || 0, tax: d.tax || 0 })),
       cacheRows:  cacheRows.length,
       liveOrders: liveResult ? liveResult.orders : 0,
+      /* What this answer actually covers. The client merges a settled half and a live half into one
+       * store, and a half that does not say which one it is cannot be merged safely — summing two
+       * settled halves would double the month. Always present, including on the unsplit default. */
+      phase: wantSettled && wantLive ? 'both' : (wantSettled ? 'settled' : 'live'),
     });
   } catch (err) {
     return jsonOut_({ error: err.message });

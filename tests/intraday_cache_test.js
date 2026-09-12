@@ -129,8 +129,11 @@ check('and returns real numbers', got && got.netSales, 200);
 console.log('\nthe wrapper is wired into the sales path, not merely defined');
 check('getStoreSales_ passes its nocache through to the live fetch',
   /dutchieTodayFetch_\(store, todayPT, to, nocache\)/.test(SRC), true);
+// nocache has to be the FOURTH argument, which is what this pins. Arity is deliberately left
+// open: `phase` was added after this test and pinning the exact call shape made an unrelated
+// change fail here, which teaches the next person to loosen the assertion rather than read it.
 check('the route hands params.nocache to getStoreSales_',
-  /getStoreSales_\(store, from, to, params\.nocache\)/.test(SRC), true);
+  /getStoreSales_\(store, from, to, params\.nocache\b/.test(SRC), true);
 
 console.log('\n──────────────────────────────');
 console.log(`${pass} passed, ${fail} failed`);

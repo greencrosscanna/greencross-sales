@@ -65,7 +65,13 @@ console.log('\n1. render() tells "nothing yet" apart from "nothing, and nothing 
 
 console.log('\n2. salesPending is EXECUTED, not just present');
 {
-  const ctx = { liveData: {}, _loadAllStoresInFlight: false };
+  // salesPending also answers the today-scoped question now, so the context has to carry the state
+  // that question is about: which day is selected, what today is, and who is missing today.
+  const TODAY = '2026-09-11';
+  const ctx = {
+    liveData: {}, _loadAllStoresInFlight: false,
+    activeDay: null, _todayPending: new Set(), laDay: () => TODAY,
+  };
   vm.createContext(ctx);
   vm.runInContext(grab('salesPending'), ctx);
 
@@ -76,6 +82,38 @@ console.log('\n2. salesPending is EXECUTED, not just present');
   ok('loading with one store landed → NOT pending', ctx.salesPending() === false);
   ctx._loadAllStoresInFlight = false;
   ok('idle with data → not pending', ctx.salesPending() === false);
+}
+
+console.log("\n2b. a today view with no today figure shimmers instead of printing $0");
+{
+  const TODAY = '2026-09-11';
+  const ctx = {
+    liveData: { Bend: {}, River: {} }, _loadAllStoresInFlight: false,
+    activeDay: TODAY, _todayPending: new Set(['Bend', 'River']), laDay: () => TODAY,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(grab('salesPending'), ctx);
+
+  ok('today selected, today missing everywhere → pending',
+     ctx.salesPending() === true);
+
+  // The half that is easy to get wrong: SOME stores having today is not the same as none having it.
+  ctx._todayPending = new Set(['Bend']);
+  ok('one store short of today → NOT pending, the view paints what it has',
+     ctx.salesPending() === false);
+
+  // ...and the same missing figure must not blank a month, which is mostly settled data.
+  ctx._todayPending = new Set(['Bend', 'River']);
+  ctx.activeDay = null;
+  ok('a month view is never blanked by a missing today', ctx.salesPending() === false);
+
+  ctx.activeDay = '2026-09-04';
+  ok('a PAST day never waits on today', ctx.salesPending() === false);
+
+  ctx.activeDay = TODAY;
+  ctx.liveData = {};
+  ok('no stores at all falls back to the load-in-flight rule, not this one',
+     ctx.salesPending() === false);
 }
 
 console.log('\n3. the hero shimmers rather than printing a $0 it never measured');

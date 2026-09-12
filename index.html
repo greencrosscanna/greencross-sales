@@ -1395,7 +1395,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.585';
+const APP_VERSION = 'v2.586';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2139,7 +2139,6 @@ const THRESHOLDS = Object.freeze({
   GOAL_BAR_FILL_RATIO:   0.8,   // bar fills to 80 % of container width
   DOW_MIN_SAMPLES:       4,     // minimum days per DOW for weighted average
   CRITICAL_DOH_DAYS:     3,     // inventory days-on-hand red threshold
-  BACKFILL_MONTH_COUNT:  12,    // full year — DOW chart needs all occurrences of each weekday
 });
 
 // Pacing thresholds — user-adjustable, persisted to localStorage
@@ -2811,65 +2810,109 @@ function updateCacheStatus() {
   el.textContent = `${keys.length} item${keys.length>1?'s':''} cached (${salesKeys.length} sales months) · oldest ${mins < 60 ? mins+'m' : Math.round(mins/60)+'h'} ago`;
 }
 
-// Silently fetch daily sales for all prior months so the DOW chart has full-year data.
-// Checks which months already have data in allDailyData before fetching.
-// How many prior months to backfill for DOW chart/weights — keeps localStorage lean.
-// BACKFILL_MONTHS moved to THRESHOLDS.BACKFILL_MONTH_COUNT
+// Silently fill in daily sales for every prior month of the active year, so the day-of-week chart
+// ("all Saturdays", "all Mondays") and the DOW weights have the whole year behind them.
+// Checks allDailyData, then localStorage, before asking the network for anything.
 
+/* ONE REQUEST PER STORE FOR THE WHOLE YEAR, NOT ONE PER MONTH.
+ *
+ * Sky, 2026-09-12, from an iPhone on the Income tab: "the all saturdays data is taking a long time
+ * to load. I thought we were caching this and would expect it to load very quickly."
+ *
+ * It was cached — the comment that used to sit here said historical months were "kept in-memory
+ * only (allDailyData), never written to localStorage" while the code three lines below it called
+ * writeSalesCache. The COMMENT was the wrong one, and it had been wrong since the write was added.
+ * What Sky actually hit is the TTL: a settled month is cached for one hour (SALES_TTL_HIST), so any
+ * visit more than an hour after the last one re-fetched the entire year from scratch. A morning
+ * open is always that visit.
+ *
+ * And re-fetching the year was 48 separate /exec round trips — 8 months x 6 stores — through a pool
+ * of 4. MEASURED on the live deployment 2026-09-12, proxy cache warm, zero failures: 48 requests,
+ * 2.1s min / 3.0s median / 8.6s max each, 44.6 SECONDS of wall clock before the chart was complete.
+ * That is the whole of Sky's "long time"; it was never the phone and never the data.
+ *
+ * The data is not what costs anything. The loadprobe route, run against the same six stores for
+ * the FULL Jan-Aug range, reports 31-55ms of server work apiece — the settled days come out of
+ * GXCore's cache in one read, and asking for 243 days costs the same as asking for 31 (96ms vs
+ * 42ms of it is the read; the rest is fixed per-request overhead). Sequentially, a whole-year
+ * request measured 2.3-3.2s against 2.5-3.4s for a single month: INDISTINGUISHABLE. The entire
+ * 44.6s was per-request round-trip overhead, multiplied by 48.
+ *
+ * (That route is named as a bare word above, never as `action=<name>` in a query string, because
+ *  dev_guard_actions_test.js scans this file for that literal and cannot tell a route the page
+ *  FETCHES from one a comment merely cites. It is deploy-secret-only; the page never calls it.)
+ *
+ * So the pool is not the problem and is deliberately NOT being raised. The 2026-09-06 measurement
+ * behind it still stands: 48 simultaneous executions against the Apps Script 30-per-user cap made
+ * some of the backfill fail silently into a `catch {}` and stole throughput from the 60-second poll
+ * that keeps the visible numbers fresh. This work is invisible and should lose every race against
+ * the load the reader is actually waiting on. Six requests through a pool of 4 is two waves — it
+ * loses that race by a wider margin than 48 ever did, not a narrower one.
+ *
+ * The range never reaches today (maxMo stops before the current month), so the backend takes its
+ * settled path and makes no Dutchie call at all — confirmed by loadprobe, which reports only
+ * settled_cache_hit for these ranges and no live_today mark. `phase` is therefore deliberately NOT
+ * sent: it would change nothing about the answer and the default keeps this caller's contract
+ * identical to every other one.
+ *
+ * WHAT THIS GIVES UP: the per-month localStorage write that used to ride along here ("cache so
+ * setMonth nav is instant"). One answer spanning several months is not a month payload, and
+ * synthesizing one — re-summing the day rows into netSales / weekly / aov on the client — would be
+ * this app re-implementing the server's aggregation over figures that gate a bank-deposit
+ * reconciliation. Months that ARE already cached are still read and still free; a past month opened
+ * cold now costs the one fetch fetchMonthData already makes and caches. That prewarm was only ever
+ * worth anything inside the same TTL hour, and it was costing the reader 44.6 seconds of chart.
+ */
 async function backfillDailyHistory(proxyUrl) {
   if (!proxyUrl) return;
   const curYear = new Date().getFullYear();
   const curMo   = new Date().getMonth() + 1;
   const maxMo   = activeYear < curYear ? 12 : curMo - 1; // stop before current month
-  // Backfill all months in the active year so the DOW chart shows the full year.
-  // Data lives in allDailyData (in-memory only), never written to localStorage.
-  const minMo = 1;
+  const minMo   = 1;
 
-  // Build the full list of (store, month) pairs that are missing data, then
-  // fetch them all in parallel rather than month-by-month sequentially.
+  // One task per STORE, carrying the months that store is still missing.
   const tasks = [];
-  for (let m = minMo; m <= maxMo; m++) {
-    const prefix = activeYear + '-' + String(m).padStart(2, '0');
-    for (const store of STORES) {
-      if (Object.keys(allDailyData[store.name] || {}).some(d => d.startsWith(prefix))) continue;
-      tasks.push({ store, m });
+  for (const store of STORES) {
+    const have = Object.keys(allDailyData[store.name] || {});
+    const months = [];
+    for (let m = minMo; m <= maxMo; m++) {
+      const prefix = activeYear + '-' + String(m).padStart(2, '0');
+      if (have.some(d => d.startsWith(prefix))) continue;
+      months.push(m);
     }
+    if (months.length) tasks.push({ store, months });
   }
   if (tasks.length === 0) return;
 
-  /* This used to fire EVERY task at once with a bare fetch(). Measured on the live app 2026-09-06,
-   * that was 48 simultaneous Apps Script executions (8 months x 6 stores) landing in one burst the
-   * instant the dashboard became usable — on top of the 15 the boot already fires. Two things are
-   * wrong with it and only one is the count:
-   *
-   *  - A bare fetch has NO TIMEOUT. That is the same defect fetchMonthData was fixed for on v2.560:
-   *    a bounced /exec hop never fails, it just never comes back, and it holds its slot forever.
-   *  - Apps Script caps SIMULTANEOUS EXECUTIONS PER USER (30). Past that the extras are queued or
-   *    refused, so firing 48 does not make the backfill finish sooner — it makes some of it fail,
-   *    silently, into a `catch {}`, and it steals throughput from the 60-second poll that is the
-   *    only thing keeping the visible numbers fresh.
-   *
-   * A pool of 4 is deliberately well under the cap rather than at it: this work is invisible (it
-   * feeds the day-of-week chart), so it should lose every race against the load the reader is
-   * actually waiting on. gasFetchJson gives each task the same bounded wait the foreground fetches
-   * get; one attempt, because the next period change will ask again anyway. */
   const BACKFILL_POOL = 4;
   let _bfNext = 0;
-  const runBackfillTask = async ({ store, m }) => {
+  const runBackfillTask = async ({ store, months }) => {
     try {
-      // Read from localStorage if available; fetch from API otherwise.
-      // Historical months are NOT written back to localStorage — kept in-memory only
-      // (allDailyData) to avoid blowing the quota.
-      const cached = readSalesCache(store.name, activeYear, m);
-      const data   = cached ?? await (async () => {
-        const { from, to } = monthRange(m, activeYear);
-        const url = `${proxyUrl}?store=${encodeURIComponent(store.name)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&token=${encodeURIComponent(getToken())}${serverBypassParam()}`;
-        const d = await gasFetchJson(url, 1, 20000);
-        if (!d || d.error) return null;
-        writeSalesCache(store.name, activeYear, m, d); // cache so setMonth nav is instant
-        return d;
-      })();
-      if (data) mergeDailyData(store.name, data.daily);
+      // localStorage first, month by month — a cached month is free and must not widen the request.
+      const stillMissing = [];
+      for (const m of months) {
+        const cached = readSalesCache(store.name, activeYear, m);
+        if (cached) mergeDailyData(store.name, cached.daily);
+        else stillMissing.push(m);
+      }
+      if (!stillMissing.length) return;
+
+      /* ONE request spanning the missing months. Gaps inside the span are re-fetched rather than
+       * stitched around: a second round trip costs ~3s and the extra days cost ~50ms of server
+       * work, so splitting the span to avoid re-reading a cached month would be slower, not
+       * faster. Both ends go through monthRange so the date-as-TEXT rule holds — it builds plain
+       * local YYYY-MM-DD strings, never toISOString(). */
+      const from = monthRange(stillMissing[0], activeYear).from;
+      const to   = monthRange(stillMissing[stillMissing.length - 1], activeYear).to;
+      const url  = `${proxyUrl}?store=${encodeURIComponent(store.name)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&token=${encodeURIComponent(getToken())}${serverBypassParam()}`;
+      /* 2 attempts at 15s, matching what fetchPhase gives the foreground. It used to be one attempt
+       * "because the next period change will ask again anyway" — true when a lost task cost one
+       * month of one store, and no longer true now that it costs that store's whole year of bars.
+       * The retry does not widen the load: the pool still caps inflight requests at 4, and the
+       * worst case here is 12 requests where it used to be 48. */
+      const d = await gasFetchJson(url, 2, 15000);
+      if (!d || d.error) return;
+      mergeDailyData(store.name, d.daily);
     } catch {}
   };
   await Promise.all(Array.from({ length: Math.min(BACKFILL_POOL, tasks.length) }, async () => {

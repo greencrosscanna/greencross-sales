@@ -158,11 +158,23 @@ console.log('\n4. the KPI skeleton keeps the SAME cards, so the numbers patch in
   const dsk = ctx._kpiSkelHtml('dsk', [['gp','a'],['margin','b'],['txns','c'],['aov','d'],['disc','e'],['gross','f']]);
   ok('the desktop skeleton renders 6 cards', (dsk.match(/class="ic-kpi"/g) || []).length === 6);
 
-  // Both real builders must actually take the flag and return early on it.
-  ok('_incomeKpiMobHtml takes wait and returns the skeleton first',
-     /function _incomeKpiMobHtml\([^)]*wait\)\s*\{\s*if \(wait\) return _kpiSkelHtml/.test(grab('_incomeKpiMobHtml')));
-  ok('_incomeKpiDskHtml takes wait and returns the skeleton first',
-     /function _incomeKpiDskHtml\([^)]*wait\)\s*\{\s*if \(wait\) return _kpiSkelHtml/.test(grab('_incomeKpiDskHtml')));
+  /* Both real builders must actually return the skeleton while waiting — RUN, don't read.
+     This pair used to be a regex pinning `wait` as the LAST parameter, which is a fact about the
+     signature and not about the behavior: adding a parameter after it broke the assertion while
+     the builders still did the right thing, and (worse in the other direction) moving the early
+     return below the first fmtK would have kept it passing. Executing them cannot be fooled either
+     way. Nothing else is stubbed here because `wait` returns before any of it is reached — which
+     is itself part of what this asserts. */
+  vm.runInContext(grab('_incomeKpiMobHtml') + '\n' + grab('_incomeKpiDskHtml'), ctx);
+  const mobWait = ctx._incomeKpiMobHtml(1, 2, 3, 4, 5, 6, 7, 8, true);
+  const dskWait = ctx._incomeKpiDskHtml(1, 2, 3, 4, 5, 6, 7, 8, true);
+  ok('_incomeKpiMobHtml returns the 4-card skeleton while waiting',
+     mobWait === mob && (mobWait.match(/val-skel/g) || []).length === 4);
+  ok('_incomeKpiDskHtml returns the 6-card skeleton while waiting',
+     (dskWait.match(/class="ic-kpi"/g) || []).length === 6 &&
+     (dskWait.match(/val-skel/g) || []).length === 6 &&
+     dskWait.includes('id="ic-dsk-kpi-gp"'));
+  ok('...neither prints a fabricated $0 on the way', !/\$0/.test(mobWait) && !/\$0/.test(dskWait));
 }
 
 console.log('\n5. the phone\'s sticky mini-hero follows the same rule');

@@ -1395,7 +1395,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.586';
+const APP_VERSION = 'v2.587';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -5131,6 +5131,30 @@ function _incomeTopProductsHtml(topProds) {
 let _incomeViewType = null; // 'day' | 'week' | 'month' of the last mounted skeleton
 let _incomeMounted  = false;
 
+/* THE CHART'S DATA, HELD OUTSIDE THE FRAME THAT DRAWS IT.
+ *
+ * The full mount creates both chart instances inside a requestAnimationFrame, so between the mount
+ * and that frame `charts.week` / `charts.dskWeek` do not exist yet. Every later render takes the
+ * patch branch, and the patch branch updates the chart behind `if (charts.week)` — so a render that
+ * lands in that gap updates nothing, and the pending frame then draws whatever `weekly` it closed
+ * over at mount time. The reader is left looking at the mount's data forever.
+ *
+ * A few milliseconds of gap would not matter. A BACKGROUNDED TAB SUSPENDS rAF ENTIRELY, and that
+ * gap is unbounded: verified on the live deployment 2026-09-12 by mounting with the year's data
+ * absent and then delivering it before the frame ran — charts empty at mount (0 instances), still
+ * empty when the backfill's render arrived (0 instances, both patch guards false), and the frame
+ * eventually painted the empty version over 255 days per store of real data. Nothing heals it: the
+ * 60-second poll takes the same patch branch, and in day view it is paused anyway.
+ *
+ * Glancing away from a phone while the dashboard loads is enough to hit it, and the symptom is an
+ * all-Saturdays chart that is simply blank — which is indistinguishable from "still loading", and
+ * is very close to what Sky reported on 2026-09-12.
+ *
+ * So the frame reads the LATEST build rather than the one it was scheduled with. Deliberately a
+ * variable and not a second `if` in the patch branch: a guard there would have to re-create the
+ * instances, racing the frame that is still pending to do exactly that. */
+let _weeklyLatest   = null;
+
 function renderIncome() {
   const stores = getActiveStores();
   const { net: dutchieNet, gross, orders, disc } = getPeriodTotals(stores);
@@ -5178,6 +5202,7 @@ function renderIncome() {
 
   const storeNets = Object.fromEntries(stores.map(s => [s, getStorePeriodNet(s)]));
   const weekly    = activeDay ? buildDayOfWeekChart(stores) : activeWeek ? buildWeeklyDays(stores) : buildMonthDailyChart(stores);
+  _weeklyLatest   = weekly;   // the pending mount frame draws THIS, not the build it was scheduled with
   const topProds  = activeDay ? [] : buildTopProducts(stores);
   const viewType  = activeDay ? 'day' : activeWeek ? 'week' : 'month';
   const otherHtml = _incomeOtherRevHtml();
@@ -5267,7 +5292,7 @@ function renderIncome() {
       </div>
       <div class="last-sync" id="income-last-sync"><span id="income-last-sync-txt">${syncTime}</span><button class="bug-inline" onclick="openBugModal()" title="Report a bug">🐞 Report a bug</button></div>`;
 
-    requestAnimationFrame(() => { drawWeekChart(weekly); animateStorePacingBars(true); });
+    requestAnimationFrame(() => { drawWeekChart(_weeklyLatest); animateStorePacingBars(true); });
 
   } else {
     // ── Patch: update only changed nodes, preserve both chart canvases ───────

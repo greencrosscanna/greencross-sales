@@ -28,6 +28,57 @@ function gxDeploySecret_() {
   return s;
 }
 
+/* ─── HOW LONG A RETRY IS ALLOWED TO GO ON ───────────────────────────────────────────────────────
+ *
+ * One number for all four GX Core retry loops in this file (gxDutchieGet_, gxCoreRoute_,
+ * qbReportViaGXCore_, qbDepositsViaGXCore_). They talk to the same /exec and they fail the same way,
+ * so a per-loop number would be four places for the same fact to rot.
+ *
+ * THE RETRY ITSELF IS RIGHT AND MUST KEEP WORKING. Measured on the live app 2026-09-11 (v2.585):
+ * Hillsboro spent 32.3s on an HTTP 404 whose IMMEDIATE retry then succeeded in 2.5s. That recovery
+ * is the entire reason these loops exist, and a guard that kills it is worse than no guard — so the
+ * budget has to sit well ABOVE 32.3s, not near it.
+ *
+ * WHAT WAS MISSING IS THE OTHER END: THE BOUNCE IS NOT FAST. The comment that used to sit on the
+ * sleep below said "the /exec second hop 404s on ~6% of rapid calls", which describes a quick miss.
+ * The rate is about right; the shape is not. The same night, Center and River were dead at 60s. And
+ * GX Core's own /exec self-probe (?action=request_stats, read live 2026-09-12) puts a BOUNCED round
+ * trip at 46.6s on average across 11 of 147 probes — against 4.8s for the 136 that did not bounce —
+ * with a worst single round trip of 628.8s. Apps Script kills a script at 360s. So five sequential
+ * attempts against a bouncing endpoint outrun the cap, and when they do the caller gets a DEAD
+ * REQUEST instead of the clean "unreachable" error the loop was written to produce. A retry that
+ * converts a clean failure into a timeout is worse than no retry.
+ *
+ * WHY 60s AND NOT ANOTHER NUMBER:
+ *   - It is nearly double the 32.3s stall that recovered on the next try, so the fast lane and the
+ *     slow-but-working lane both still get every attempt their loop has.
+ *   - The check happens BEFORE sleeping and re-asking, so the worst case is the budget plus ONE more
+ *     attempt: 60s + the 130s top of the measured bounce band = 190s, leaving 170s of the 360s cap
+ *     for the settled half of the same request and the response build.
+ *   - NOT 45s, which is what Price Cards picked for its own loop the same day. That loop makes three
+ *     attempts; these make five, and a single HEALTHY attempt here measured 21.6s on 2026-09-12
+ *     (49 live samples, 3.4s average), so 45s would start clipping working requests on a slow day.
+ *     The constant is not a shared suite truth and must not be synced as one.
+ *   - NOT 120s or more: the browser bounds a store fetch at 15s x 2, so past ~30s nobody is waiting.
+ *     Further attempts buy the reader nothing and only spend the cap.
+ *
+ * WHAT IT DOES NOT DO: it cannot shorten a call already in flight — attempt 1 alone was measured at
+ * 628.8s. It bounds the MULTIPLICATION, which is the part this side controls. */
+const GXCORE_RETRY_BUDGET_MS = 60000;
+
+/* The backoff, and the one decision in front of it. Returns '' to go again, or the note to append to
+   the calling loop's own error when the budget is spent. Deliberately does NOT throw: each loop owns
+   its own message, and a shared throw here would erase which route failed. */
+function gxRetryHold_(started, backoffMs) {
+  const spent = Date.now() - started;
+  if (spent >= GXCORE_RETRY_BUDGET_MS) {
+    return ' (stopped after ' + Math.round(spent / 1000) + 's — another attempt on a stalled hop'
+         + ' would outrun the 360s execution limit)';
+  }
+  Utilities.sleep(backoffMs);
+  return '';
+}
+
 /* One Dutchie read through GX Core. `params` are forwarded verbatim, so each caller keeps its own
    query semantics. Returns the rows array, or the raw object for endpoints that answer with one. */
 function gxDutchieGet_(store, path, params) {
@@ -39,8 +90,17 @@ function gxDutchieGet_(store, path, params) {
     qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
   });
 
-  let lastErr = '';
+  let lastErr = '', stopped = '', tries = 0;
+  const started = Date.now();
   for (let i = 0; i < 5; i++) {
+    if (i > 0) {
+      // Backoff and budget, in that order of appearance but the budget decides first — see
+      // GXCORE_RETRY_BUDGET_MS above. The sleep moved up here from the bottom of the loop, where it
+      // also paid 400ms after the FINAL attempt, for nothing.
+      stopped = gxRetryHold_(started, 400);
+      if (stopped) break;
+    }
+    tries++;
     const _ta = Date.now();
     const resp = UrlFetchApp.fetch(GXCORE_EXEC_ + qs, { muteHttpExceptions: true });
     let data = null;
@@ -53,9 +113,10 @@ function gxDutchieGet_(store, path, params) {
     // A refusal is final. Retrying a bad secret or a disallowed path buries the message explaining it.
     if (data && data.ok === false) throw new Error('GX Core dutchie_get ' + path + ': ' + (data.error || 'refused'));
     lastErr = lastErr || 'no payload';
-    Utilities.sleep(400);   // the /exec second hop 404s on ~6% of rapid calls
   }
-  throw new Error('GX Core dutchie_get ' + path + ' unreachable after 5 tries — ' + lastErr);
+  // `tries`, not a hardcoded 5: a budget bail that still claimed five attempts would be a lie in the
+  // one message anybody reads when this breaks.
+  throw new Error('GX Core dutchie_get ' + path + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
 }
 
 /* Non-Dutchie GX Core reads that also cannot be library calls.
@@ -72,15 +133,19 @@ function gxCoreRoute_(action, params) {
     if (params[k] == null || params[k] === '') return;
     url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
   });
+  let lastErr = '', stopped = '', tries = 0;
+  const started = Date.now();
   for (let i = 0; i < 3; i++) {
+    if (i > 0) { stopped = gxRetryHold_(started, 300); if (stopped) break; }   // see GXCORE_RETRY_BUDGET_MS
+    tries++;
     const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     let data = null;
-    try { data = JSON.parse(resp.getContentText()); } catch (e) {}
+    try { data = JSON.parse(resp.getContentText()); } catch (e) { lastErr = 'unparseable body'; }
     if (data && data.ok === true) return data;
     if (data && data.ok === false) throw new Error(action + ': ' + (data.error || 'refused'));
-    Utilities.sleep(300);
+    lastErr = lastErr || 'no payload';
   }
-  throw new Error('GX Core ' + action + ' unreachable');
+  throw new Error('GX Core ' + action + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
 }
 
 /* The store vocabulary, from the shared registry rather than from the keys of a local credential
@@ -2363,14 +2428,18 @@ function qbReportViaGXCore_(start, end, by) {
   const url = GXCORE_EXEC + '?action=qb_pnl&secret=' + encodeURIComponent(secret)
     + '&start=' + encodeURIComponent(start) + '&end=' + encodeURIComponent(end)
     + '&by=' + encodeURIComponent(by || 'Month');
+  let stopped = '', tries = 0;
+  const started = Date.now();
   for (let i = 0; i < 5; i++) {
+    // Transient Drive-HTML miss → retry, but not past the budget — see GXCORE_RETRY_BUDGET_MS.
+    if (i > 0) { stopped = gxRetryHold_(started, 500); if (stopped) break; }
+    tries++;
     const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     let data = null; try { data = JSON.parse(resp.getContentText()); } catch (e) {}
     if (data && data.ok === true && data.report) return data.report;
     if (data && data.ok === false) throw new Error(data.error || 'qb_pnl error');   // connected but errored → surface it; nothing to fall back TO
-    Utilities.sleep(500);   // transient Drive-HTML miss → retry
   }
-  throw new Error('qb_pnl unreachable after retries');
+  throw new Error('qb_pnl unreachable after ' + tries + ' tries' + stopped);
 }
 
 
@@ -2399,14 +2468,18 @@ function qbDepositsViaGXCore_(start, end) {
   if (!secret) throw new Error('GX_DEPLOY_SECRET not set on this script — cannot reach GX Core');
   const url = GXCORE_EXEC_ + '?action=qb_deposits&secret=' + encodeURIComponent(secret)
     + '&start=' + encodeURIComponent(start) + '&end=' + encodeURIComponent(end);
+  let stopped = '', tries = 0;
+  const started = Date.now();
   for (let i = 0; i < 5; i++) {
+    // Transient Drive-HTML miss → retry, same as the P&L bridge, and budgeted the same way.
+    if (i > 0) { stopped = gxRetryHold_(started, 500); if (stopped) break; }
+    tries++;
     const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     let data = null; try { data = JSON.parse(resp.getContentText()); } catch (e) {}
     if (data && data.ok === true && Array.isArray(data.deposits)) return data.deposits;
     if (data && data.ok === false) throw new Error(data.error || 'qb_deposits error');
-    Utilities.sleep(500);   // transient Drive-HTML miss → retry, same as the P&L bridge
   }
-  throw new Error('qb_deposits unreachable after retries');
+  throw new Error('qb_deposits unreachable after ' + tries + ' tries' + stopped);
 }
 
 // Dates are TEXT end to end. Accepts only YYYY-MM-DD, else ''. Same rule and same reason as

@@ -1051,6 +1051,40 @@ answer to "the goals feel too high", and it is NOT the stretch multiplier, which
 because a manual override zeroes stretch. Stretch also cannot compound — the next goal is computed
 from actual SALES, never from the previous goal.
 
+## Every GX Core retry in the backend is now on a 60-second clock
+
+All four /exec retry loops in `dutchie_proxy.gs` — `gxDutchieGet_`, `gxCoreRoute_`,
+`qbReportViaGXCore_`, `qbDepositsViaGXCore_` — retried on a stopwatch nobody was holding. Attempt
+counts are 5, 3, 5, 5; nothing measured how long the whole loop had already taken. **Apps Script
+kills a script at 360s**, so a bouncing endpoint could make the loop outrun the cap, and the caller
+then got a *dead request* instead of the clean `unreachable` error the loop exists to produce. A
+retry that converts a clean failure into a timeout is worse than no retry. `GXCORE_RETRY_BUDGET_MS`
+(60,000) is checked **before sleeping and re-asking**; the full derivation of the number is in the
+comment above the constant, and `tests/gxcore_retry_budget_test.js` (55 assertions) executes all
+four loops against a scripted clock.
+
+**Do not sync that constant from another app.** Price Cards picked 45,000 the same day for a
+three-attempt loop; these make five, and this app's own healthy attempt measured 21.6s once in 49
+live samples. The number is derived from this repo's measurements and the 360s cap, not shared.
+
+**This app's `probeMark_` marks are NOT a log — nothing accumulates across executions.**
+`_PROBE_MARKS` is `null` unless `loadProbe_` turns it on, and it is set back to `null` at the end of
+every store, so the per-attempt durations `gxDutchieGet_` records exist only inside the response of
+a `?action=loadprobe` call. There is no history to read back and no "worst ever" to look up. **The
+suite's only persisted /exec telemetry is GX Core's**, at `?action=request_stats` (deploy-secret
+gated): `timing[]` is GX Core's own execution time and `caller_wait` is a real round trip through
+`/exec`, sampled every 10 minutes by `gxProbeSelfScheduled`. Read live 2026-09-12 it said 147
+probes, 7.9s average, **628.8s worst**, and — the number that matters — **11 multi-hop (bounced)
+probes averaging 46.6s against 136 single-hop averaging 4.8s**. That is where "the bounce is slow"
+comes from; measuring this app alone during a good spell says nothing, as 49 clean samples that
+afternoon demonstrated.
+
+**Known and deliberately NOT changed: `getCogsDutchie` calls `gxCoreRoute_` once per store, six
+times in sequence.** A per-call budget cannot bound that loop — six bad calls exceed the cap no
+matter what each one is allowed. It survives today because each store is individually `try`/`catch`ed
+and the whole result is cached (10 min / 6 h). Bounding it properly means a loop-wide deadline and a
+partial Gross Profit figure, which is a behavior change, not a guard.
+
 ## Today's sales are pulled ONCE and shared — the cost scaled with tabs, not people
 
 Every read this app makes comes out of `CacheService`, which lives on the SCRIPT and is therefore

@@ -45,6 +45,19 @@ function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
+/* A SUITE THAT NEVER REACHES ITS OWN SUMMARY MUST NOT EXIT 0.
+ *
+ * The body is an async IIFE, so an await that never settles ends the process quietly with exit 0
+ * and nothing on stdout — indistinguishable, to the push gate, from a clean pass. That is the
+ * failure this file already warns about one line above its exitCode, from a cause it did not
+ * anticipate. Belt and braces: if the summary never printed, say so and fail. */
+let finished = false;
+process.on('exit', (code) => {
+  if (finished || code !== 0) return;
+  console.log('\nFAIL: this suite exited without reaching its summary — an await never settled.');
+  process.exitCode = 1;
+});
+
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; } else { fail++; console.log('  FAIL: ' + msg); } }
 function eq(a, b, msg) { ok(a === b, msg + ' (got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b) + ')'); }
@@ -187,7 +200,15 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
     const calls = [];
     const ctx = {
       console, Math, JSON, Error, Promise, clearTimeout: () => {},
-      setTimeout: (f, ms) => { if (ms >= 1000) f(); return 1; },   // fire the abort, skip the backoff
+      /* FIRE EVERY TIMER IMMEDIATELY. This used to fire only ms >= 1000 — "fire the abort, skip the
+       * backoff" — but the two cannot be told apart by duration: the abort is scheduled at `cap`
+       * (1000 here) and gasFetchJson's retry backoff at 700 + Math.random() * 500, i.e. 700-1200.
+       * When the random landed under 1000 the backoff promise never resolved, this suite hung on
+       * its own await, and Node emptied the event loop and exited 0 WITH NO OUTPUT — which
+       * gx-preflight.sh reads as a pass. Measured 2026-09-11: 6 silent runs in 12, so roughly half
+       * of all pushes were gated on 43 assertions that never ran. Firing everything at once is
+       * still no real waiting, and it is deterministic. */
+      setTimeout: (f) => { f(); return 1; },
       AbortController: function () {
         this.signal = { aborted: false };
         this.abort = () => { this.signal.aborted = true; if (this._onabort) this._onabort(); };
@@ -256,6 +277,7 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
     ok(/'libversion'/.test(SRC), 'libversion is declared in GX_DEV_READS');
   }
 
+  finished = true;
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   // exitCode, not process.exit(): exit() can cut off a buffered stdout write, and a suite that
 // prints NOTHING while exiting 0 reads as a pass to gx-preflight.sh. A silent green is worse

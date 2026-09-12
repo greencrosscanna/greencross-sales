@@ -47,6 +47,17 @@ function grabFrom(src, file, name) {
 const gs   = n => grabFrom(GS,   'dutchie_proxy.gs', n);
 const html = n => grabFrom(HTML, 'index.html',       n);
 
+/* This file's body is an async IIFE, and an await that never settles ends the process quietly with
+ * exit 0 and nothing on stdout — which gx-preflight.sh cannot tell from a clean pass. That is not
+ * hypothetical: background_refresh_test.js had exactly that, silent on 6 runs in 12, and the gate
+ * counted it green every time. Same guard here. */
+let finished = false;
+process.on('exit', (code) => {
+  if (finished || code !== 0) return;
+  console.log('\nFAIL: this suite exited without reaching its summary — an await never settled.');
+  process.exitCode = 1;
+});
+
 let pass = 0, fail = 0;
 function ok(label, cond) {
   if (cond) { pass++; console.log('  PASS ' + label); }
@@ -239,6 +250,23 @@ function harness(live) {
     eq('...and it is not ALSO reported as merely today-pending', h.ctx._todayPending.size, 0);
   }
 
+  console.log('\n3b. an old backend that ignores `phase` must not double the month');
+  {
+    /* THE WORST FAILURE AVAILABLE HERE, because every resulting number stays plausible. The page is
+     * on GitHub Pages and the backend is a separate clasp deploy, so the two are never updated in
+     * the same instant and Pages can serve a stale page for a minute either way. A backend that does
+     * not know the parameter ignores it and answers the WHOLE MONTH to both questions. */
+    const h = harness('ok');
+    const whole = { store: 'Bend', netSales: 11000, orders: 120, cost: 6400,
+                    weekly: [], daily: [{ date: '2026-09-11', netSales: 11000 }], phase: 'both' };
+    h.ctx.fetchPhase = async () => JSON.parse(JSON.stringify(whole));
+    const d = await h.ctx.fetchMonthData({ name: 'Bend' }, 2026, 9);
+    eq('the month is taken once, not merged with its own duplicate', d.netSales, 11000);
+    eq('...and orders likewise', d.orders, 120);
+    eq('...and it still caches, because it IS the complete month', h.cacheWrites.length, 1);
+    eq('...and nothing is left pending', h.ctx._todayPending.size, 0);
+  }
+
   {
     const fmd = html('fetchMonthData');
     ok('both halves are fired at once, not one after the other', /Promise\.allSettled\(/.test(fmd));
@@ -254,7 +282,10 @@ function harness(live) {
        /pill\(pend\.length \? 'amber' : 'green'/.test(las));
   }
 
+  finished = true;
   console.log('\n──────────────────────────────');
   console.log(`${pass} passed, ${fail} failed`);
-  process.exit(fail ? 1 : 0);
+  // exitCode, not process.exit(): exit() can cut off a buffered stdout write, and a suite that
+  // prints nothing while exiting 0 reads as a pass.
+  process.exitCode = fail ? 1 : 0;
 })();

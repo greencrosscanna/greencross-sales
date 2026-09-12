@@ -3167,6 +3167,24 @@ async function loadAllStores() {
       throw e;
     }
 
+    /* A BACKEND THAT DOES NOT KNOW `phase` ANSWERS BOTH HALVES TO BOTH QUESTIONS.
+     *
+     * It ignores the unknown parameter and returns the whole month twice, and merging those two
+     * answers DOUBLES every figure on the dashboard — the worst possible failure here, because
+     * every number stays perfectly plausible. This is not hypothetical: the frontend is on GitHub
+     * Pages and the backend is a separate clasp deploy, so the two are never updated in the same
+     * instant, and Pages can serve a stale page for a minute after a release either way.
+     *
+     * The settled half says what it is. Anything other than 'settled' means the split did not
+     * happen, so that answer is already the complete month and the live half is a duplicate of it. */
+    const split = sRes.value && sRes.value.phase === 'settled';
+    if (!split) {
+      stateMap[store.name] = 'ok';
+      _todayPending.delete(store.name);
+      writeSalesCache(store.name, year, month, sRes.value);
+      return sRes.value;
+    }
+
     const merged = mergeStorePhases_(sRes.value, lRes.status === 'fulfilled' ? lRes.value : null);
     stateMap[store.name] = 'ok';
 

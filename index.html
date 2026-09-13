@@ -631,6 +631,11 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 .ic-kpi-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
 .ic-kpi-val{font-size:25px;font-weight:500;color:var(--text);line-height:1.05}
 .ic-kpi-sub{font-size:12px;margin-top:4px}
+/* A KPI whose inputs did not all arrive. Amber and an amber left edge, the same language v2.585
+   used for a store that was "today pending" — the card is readable but is not claiming to be whole.
+   The sub-line names the stores; the border is what catches the eye of someone scanning past. */
+.ic-kpi-partial{box-shadow:inset 3px 0 0 var(--amber)}
+.ic-kpi-short{color:var(--amber);font-weight:600}
 /* Desktop hero row */
 .ic-hero-row{display:grid;grid-template-columns:1fr 280px;gap:14px;align-items:start}
 /* Desktop hero card (larger) */
@@ -1395,7 +1400,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.587';
+const APP_VERSION = 'v2.588';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1490,7 +1495,16 @@ let goals = {};       // loaded from budget spreadsheet via proxy (historical mo
 let goalsYear = null; // calendar year `goals` describes; null = backend didn't say — see getGoal()
 let expenseData = null; // loaded from QuickBooks via proxy
 let expensesLoading = false;
-let invGmData = null;   // {cogs:{storeName:total}, byDay, byMonth} — 28d from cogs_dutchie
+let invGmData = null;   // {cogs:{storeName:total}, byDay, byMonth, missing} — 28d from cogs_dutchie
+/* Stores whose COGS did not arrive in the last cogs_dutchie answer. Empty means the figure is
+   whole; anything in it means every Gross Profit and Margin derived from invGmData is understated
+   in COST and therefore OVERSTATED in profit, and must say so on screen. Same job as
+   `_todayPending` does for sales, for the other half of the same card. */
+let _cogsMissing = [];
+/* Set by computeInvCost as it returns: did the number it just handed back actually come from
+   invGmData, and was invGmData short for the stores in view? A second function re-deciding that
+   would be a copy of computeInvCost's branches, and the copy is what goes stale. */
+let _invCostPartial = false;
 let _invGmLoading = false;
 let expBudgets = null;  // loaded from Annual Budget sheet via proxy
 let expBudgetsOverlaid = new Set(); // categories whose budget is an applied smart-budget overlay
@@ -4712,7 +4726,26 @@ function _kpiSkelHtml(prefix, labels) {
     </div>`).join('');
 }
 
-function _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wait) {
+/* WHAT A PARTIAL GROSS PROFIT SAYS ON SCREEN.
+ *
+ * A COGS payload short one store subtracts less cost, so Gross Profit and Margin both read HIGH.
+ * That is the worst shape a wrong number can have on this card: it is plausible, it is flattering,
+ * and nothing about the figure itself gives it away. This app already has the vocabulary for it —
+ * v2.585 marked a store "today pending" in amber when its live sales leg timed out — so this
+ * reuses the word, the color and the naming of the stores.
+ *
+ * It does NOT reuse the status pill, and that is a placement decision rather than a shortcut. The
+ * pill is painted once when the six store loads finish; COGS arrives afterwards on its own request,
+ * so a pill that carried this would either be a repaint racing the store load or would be stale
+ * exactly when it mattered. More to the point, the pill sits at the top of the page and the figure
+ * it would be describing is a card further down — a reader looking at Gross Profit should not have
+ * to look somewhere else to learn it is short. The mark travels with the number instead. */
+function _cogsShortSub(missing) {
+  const who = (missing || []).length ? missing.join(', ') : 'a store';
+  return `<div class="ic-kpi-sub ic-kpi-short">COGS pending: ${who} — profit reads high</div>`;
+}
+
+function _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wait, costShort) {
   if (wait) return _kpiSkelHtml('mob', [['gp','Gross profit'], ['txns','Transactions'],
                                         ['disc','Discounts'], ['gross','Gross sales']]);
   const gp     = cost > 0 ? net - cost : null;
@@ -4720,11 +4753,16 @@ function _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wai
   const gpVal  = gp !== null ? fmtK(gp) : !invGmData ? '<span class="val-skel"></span>' : '—';
   const mgSub  = margin !== null ? margin.toFixed(1) + '% margin' : !invGmData ? '<span class="val-skel" style="width:58px;height:11px"></span>' : '';
   const c = compareTotals;
+  // The margin line is derived from the SAME short COGS, so it is wrong in the same direction —
+  // showing it beside the warning would be two claims about one number, one of them false.
+  const gpSub = costShort && gp !== null
+    ? _cogsShortSub(_cogsMissing)
+    : compareSub(dnet - dcost, c && (c.net - c.cost), `<div class="ic-kpi-sub muted">${mgSub}</div>`);
   return `
-    <div class="ic-kpi" id="ic-mob-kpi-gp">
+    <div class="ic-kpi${costShort && gp !== null ? ' ic-kpi-partial' : ''}" id="ic-mob-kpi-gp">
       <div class="ic-kpi-lbl">Gross profit</div>
       <div class="ic-kpi-val">${gpVal}</div>
-      ${compareSub(dnet - dcost, c && (c.net - c.cost), `<div class="ic-kpi-sub muted">${mgSub}</div>`)}
+      ${gpSub}
     </div>
     <div class="ic-kpi" id="ic-mob-kpi-txns">
       <div class="ic-kpi-lbl">Transactions</div>
@@ -4743,7 +4781,7 @@ function _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wai
     </div>`;
 }
 
-function _incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wait) {
+function _incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wait, costShort) {
   if (wait) return _kpiSkelHtml('dsk', [['gp','Gross profit'], ['margin','Margin'],
                                         ['txns','Transactions'], ['aov','AOV'],
                                         ['disc','Discounts'], ['gross','Gross sales']]);
@@ -4752,17 +4790,23 @@ function _incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dnet, dcost, wai
   const gpVal  = gp !== null ? fmtK(gp) : !invGmData ? '<span class="val-skel"></span>' : '—';
   const mgVal  = margin !== null ? margin.toFixed(1) + '%' : !invGmData ? '<span class="val-skel" style="width:52px"></span>' : '—';
   const c = compareTotals;
+  // Margin is the same short COGS divided by net, so it is overstated by exactly the same gap and
+  // gets exactly the same mark. Marking Gross profit alone would leave a clean figure beside a
+  // flagged one, both computed from the same missing store.
+  const short = costShort && gp !== null;
   return `
-    <div class="ic-kpi" id="ic-dsk-kpi-gp">
+    <div class="ic-kpi${short ? ' ic-kpi-partial' : ''}" id="ic-dsk-kpi-gp">
       <div class="ic-kpi-lbl">Gross profit</div>
       <div class="ic-kpi-val">${gpVal}</div>
-      ${compareSub(dnet - dcost, c && (c.net - c.cost), `<div class="ic-kpi-sub muted">${gp !== null ? 'COGS ' + fmtK(cost) : ''}</div>`)}
+      ${short ? _cogsShortSub(_cogsMissing)
+              : compareSub(dnet - dcost, c && (c.net - c.cost), `<div class="ic-kpi-sub muted">${gp !== null ? 'COGS ' + fmtK(cost) : ''}</div>`)}
     </div>
-    <div class="ic-kpi" id="ic-dsk-kpi-margin">
+    <div class="ic-kpi${short ? ' ic-kpi-partial' : ''}" id="ic-dsk-kpi-margin">
       <div class="ic-kpi-lbl">Margin</div>
       <div class="ic-kpi-val">${mgVal}</div>
-      ${compareSub(dnet > 0 ? (dnet - dcost) / dnet : null, c && c.net > 0 ? (c.net - c.cost) / c.net : null,
-        margin !== null ? `<div class="ic-kpi-sub ${margin>=35?'good':margin>=25?'muted':'bad'}">of net sales</div>` : '')}
+      ${short ? _cogsShortSub(_cogsMissing)
+              : compareSub(dnet > 0 ? (dnet - dcost) / dnet : null, c && c.net > 0 ? (c.net - c.cost) / c.net : null,
+                  margin !== null ? `<div class="ic-kpi-sub ${margin>=35?'good':margin>=25?'muted':'bad'}">of net sales</div>` : '')}
     </div>
     <div class="ic-kpi" id="ic-dsk-kpi-txns">
       <div class="ic-kpi-lbl">Transactions</div>
@@ -5166,6 +5210,9 @@ function renderIncome() {
   const yr       = activeYear;
   const daysInMo = activeMonth > 0 ? new Date(activeYear, activeMonth, 0).getDate() : 365;
   const cost = computeInvCost(stores);
+  /* Read IMMEDIATELY after the call that sets it — computeInvCost decides, in one place, whether
+     the number it just returned came from a short COGS payload. See _invCostPartial. */
+  const costShort = _invCostPartial;
 
   // Per-store goals FIRST; the headline is their sum. Both the hero and the six breakdown rows read
   // this same map, so "the total" is by construction the total of what is listed under it.
@@ -5244,7 +5291,7 @@ function renderIncome() {
              rows is 476pt before the grid starts, and the usable band between the status bar and
              the filter row is 594pt. -->
         <div class="ic-kpis" id="ic-mob-kpis">
-          ${_incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait)}
+          ${_incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait, costShort)}
         </div>
         <div class="ic-mob-bd" id="ic-mob-bd">
           ${_incomeBreakdownMobHtml(stores, storeNets, isClosed, elapsedPct, yr, daysInMo)}
@@ -5271,7 +5318,7 @@ function renderIncome() {
           </div>
         </div>
         <div class="ic-dsk-kpis" id="ic-dsk-kpis">
-          ${_incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait)}
+          ${_incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait, costShort)}
         </div>
         <div class="ic-lower">
           <div class="card" id="ic-dsk-bd">
@@ -5302,8 +5349,8 @@ function renderIncome() {
     patchEl('ic-mob-hero',   _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, under, { cmpHtml, goalWait, dataWait }));
     patchEl('ic-dsk-hero',   _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, under, { cmpHtml, goalWait, dataWait }));
     patchEl('ic-dsk-proj',   _incomeProjCardHtml(net, periodGoal, isClosed, daysInMo, stores, goalWait || dataWait));
-    patchEl('ic-mob-kpis',   _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait));
-    patchEl('ic-dsk-kpis',   _incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait));
+    patchEl('ic-mob-kpis',   _incomeKpiMobHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait, costShort));
+    patchEl('ic-dsk-kpis',   _incomeKpiDskHtml(net, gross, orders, disc, cost, aov, dutchieNet, dcost, dataWait, costShort));
     patchEl('ic-mob-bd',     _incomeBreakdownMobHtml(stores, storeNets, isClosed, elapsedPct, yr, daysInMo));
     patchEl('ic-dsk-bd',     `<div class="sec-lbl" style="margin-bottom:8px">Store breakdown</div>${_incomeBreakdownDskHtml(stores, storeNets, isClosed, elapsedPct, yr, daysInMo)}`);
     patchEl('income-other-rev', otherHtml);
@@ -5907,8 +5954,11 @@ async function loadInvGmData() {
   // LA, not UTC: after 17:00 PT this asked the engine for a window ending TOMORROW.
   const to   = laDay();
   const from = laDaysAgo(28);
-  const cached = readCache(`inv_gm2_${from}`);
-  if (cached?.byDay) { invGmData = cached; return; }
+  /* `inv_gm3_`, not `inv_gm2_`: an entry written by the version before this one carries no
+     `missing` field, and an absent field reads as "nothing missing". Bumping the key orphans the
+     old entries rather than letting one be trusted as complete for two hours. */
+  const cached = readCache(`inv_gm3_${from}`);
+  if (cached?.byDay) { invGmData = cached; _cogsMissing = cached.missing || []; return; }
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
   _invGmLoading = true;
@@ -5929,11 +5979,22 @@ async function loadInvGmData() {
       if (!byMonth[mo]) byMonth[mo] = {};
       byMonth[mo][store] = (byMonth[mo][store] || 0) + c;
     }
-    invGmData = { cogs, byDay, byMonth };
-    writeCache(`inv_gm2_${from}`, invGmData);
-    console.log('InvGM (Dutchie COGS) loaded');
+    /* THE PROXY SAYS WHETHER ITS ANSWER IS WHOLE; THIS DOES NOT GUESS IT FROM THE ROWS. A store
+       that genuinely sold nothing and a store that never answered produce the same absence here,
+       and only one of them makes the figure wrong. `partial` is the proxy's own claim. */
+    const missing = (data.partial && Array.isArray(data.stores_missing)) ? data.stores_missing : [];
+    _cogsMissing = missing;
+    invGmData = { cogs, byDay, byMonth, missing };
+    /* NEVER CACHE A PARTIAL, same rule as the proxy's own cache and for the same reason one level
+       out: this entry lives two hours in localStorage, so a partial written here would outlast the
+       blip and keep the Gross Profit card reading HIGH long after the stores came back. Skipping
+       the write is also what lets the next load re-ask — a cached partial would serve itself back. */
+    if (!missing.length) writeCache(`inv_gm3_${from}`, invGmData);
+    console.log('InvGM (Dutchie COGS) loaded' +
+                (missing.length ? ' — PARTIAL, missing: ' + missing.join(', ') + ' (not cached)' : ''));
   } catch(e) {
     console.warn('InvGM fetch failed:', e.message);
+    _cogsMissing = [];
     invGmData = { cogs: {}, byDay: {}, byMonth: {} }; // stop shimmering, show —
   } finally {
     _invGmLoading = false;
@@ -5941,15 +6002,24 @@ async function loadInvGmData() {
 }
 
 function computeInvCost(stores) {
+  /* Only the stores actually IN VIEW. A missing store the reader has filtered out does not make
+     the figure in front of them wrong, and a card that is permanently marked partial is a card
+     nobody reads — the same reason the ripple gate bothers to tell a person from its own wake. */
+  const shortHere = _cogsMissing.filter(n => stores.includes(n)).length > 0;
+  _invCostPartial = false;
   if (!invGmData?.byDay) return 0;
   if (activeDay) {
     // allDailyData carries live COGS from the per-store fetch (today included)
     const fromDaily = stores.reduce((s, st) => s + (allDailyData[st]?.[activeDay]?.cogs || 0), 0);
+    // A day served straight out of the per-store fetch never touched invGmData, so it is not short
+    // even when invGmData is. Marking it would be a lie in the safe direction, which is still a lie.
     if (fromDaily > 0) return fromDaily;
     // Fall back to invGmData for days not yet in allDailyData
+    _invCostPartial = shortHere;
     const d = invGmData.byDay[activeDay] || {};
     return stores.reduce((s, st) => s + (d[st] || 0), 0);
   }
+  _invCostPartial = shortHere;
   if (activeWeek) {
     let total = 0;
     for (const day of getDaysOfISOWeek(activeYear, activeWeek)) {

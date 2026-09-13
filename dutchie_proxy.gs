@@ -3223,8 +3223,44 @@ function testProxy() {
 
 // Returns first 10 rows of a sheet by GID to inspect structure
 
+/* ─── HOW LONG THE SIX-STORE COGS SWEEP IS ALLOWED TO GO ON ──────────────────────────────────────
+ *
+ * GXCORE_RETRY_BUDGET_MS bounds ONE call. It cannot bound this loop, and it was never meant to:
+ * six bounded calls in sequence still outrun the 360s script cap, because six times a legal number
+ * is not a legal number. This is the other half of the same guard, and it is deliberately a
+ * SEPARATE constant with its own derivation — a loop deadline and a per-call retry budget are
+ * different questions and reusing one number for both is how the next loop inherits a number that
+ * was never measured for it.
+ *
+ * THE LOOP IS CHECKED BEFORE EACH STORE, NEVER MID-STORE. Nothing here can shorten a round trip
+ * already in flight, so the honest worst case is the deadline PLUS one whole store:
+ *
+ *   deadline 150s
+ * + the worst a single store can cost: gxCoreRoute_ is allowed to start a second attempt at 59.9s
+ *   (just inside GXCORE_RETRY_BUDGET_MS) and that attempt can run the 130s top of the bounce band
+ *   measured 2026-09-11/12 = ~190s
+ * = 340s, inside the 360s cap with ~20s left for the settled half already gathered and the
+ *   response build. The response is a few hundred small rows; 20s is generous for it.
+ *
+ * WHY 150s AND NOT SOMETHING SMALLER:
+ *   - A slow-but-WORKING day must still return all six stores. A single healthy round trip to GX
+ *     Core measured 3.4s on average and 21.6s at worst over 49 live samples on 2026-09-12. Six of
+ *     the worst of those back to back is ~130s. A deadline at or under that starts dropping stores
+ *     on a day when nothing is actually broken — which is the same mistake as clipping the retry,
+ *     just one level up, and it is the mistake that produces a permanently-partial money figure.
+ *   - NOT 60s. That is GXCORE_RETRY_BUDGET_MS, and copying it here would look tidy and drop two or
+ *     three stores every merely-slow afternoon.
+ *   - NOT 45s. That is the number Price Cards picked for a three-attempt loop of its own. It is not
+ *     a suite constant and must not be synced as one.
+ *   - NOT 300s. That leaves no room for the store in flight when the deadline passes, so the script
+ *     dies at the cap and the caller gets a dead request — precisely the failure this prevents.
+ *
+ * WHAT HAPPENS WHEN IT FIRES is the point: the stores already gathered are RETURNED, the ones not
+ * asked are NAMED, and the answer is NOT cached. See the cache decision at the bottom of the loop. */
+const COGS_LOOP_DEADLINE_MS = 150000;
+
 // Returns daily COGS from GXCore (Dutchie-sourced, settled days only).
-// Response: { data: [{ date, store, cogs }] }
+// Response: { data: [{ date, store, cogs }], partial, stores_answered, stores_missing, missing_reason }
 function getCogsDutchie(params) {
   // dutchie_name → Sales internal store name (only River differs)
   const STORES = [
@@ -3246,14 +3282,41 @@ function getCogsDutchie(params) {
   // Gross Profit card is what waits on it, which is why that card is the last thing to fill in on a
   // phone. Everything about the settled half is immutable — yesterday's COGS does not change — and
   // even today's only moves as sales happen.
-  const cacheKey = 'cogsd_' + from + '_' + (rawTo || 'now') + '_v1';
+  /* `_v2`, not `_v1`: entries written by the version before this one carry no `partial` field, and
+     `undefined` reads as "complete" to the guard below. Bumping the key orphans them rather than
+     trusting a payload that predates the claim. Old keys are simply never read again. */
+  const cacheKey = 'cogsd_' + from + '_' + (rawTo || 'now') + '_v2';
   if (!params.nocache) {
     const hit = cacheGet_(cacheKey);
-    if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+    if (hit) {
+      try {
+        const prev = JSON.parse(hit);
+        /* A PARTIAL MUST NOT SATISFY A CACHE READ EITHER. Nothing below writes one, so this can
+           only fire against an entry some other version or some other hand put there — and the
+           whole point of the rule is that a partial money figure must never be served under a
+           freshness claim. Belt and braces on purpose: the write guard and the read guard fail in
+           different directions, and this is the one the reader sees. */
+        if (prev && !prev.partial) return prev;
+      } catch (e) {}
+    }
   }
 
   const results      = [];
+  const answered     = [];
+  const missing      = [];
+  const missingWhy   = {};
+  const loopStarted  = Date.now();
   for (const { dutchie, sales } of STORES) {
+    /* THE DEADLINE IS THE LOOP'S, NOT THE CALL'S — see COGS_LOOP_DEADLINE_MS. Checked here, before
+       committing to another store, because that is the only moment this side controls. Everything
+       already gathered is kept and returned; the stores below are named, not silently dropped. */
+    if (Date.now() - loopStarted >= COGS_LOOP_DEADLINE_MS) {
+      missing.push(sales);
+      missingWhy[sales] = 'not asked — the sweep hit its ' + Math.round(COGS_LOOP_DEADLINE_MS / 1000)
+                        + 's deadline after ' + Math.round((Date.now() - loopStarted) / 1000) + 's';
+      continue;
+    }
+    let storeOk = true;
     try {
       // Settled days via sales_daily cache (sourced from Dutchie Closing Report, nightly)
       const rows = GXCore.getSalesDaily(dutchie, from, settledTo) || [];
@@ -3269,18 +3332,45 @@ function getCogsDutchie(params) {
           const cr = crr && (crr.data || (crr.rows && crr.rows[0]));
           results.push({ date: todayPT, store: sales, cogs: Math.round(Number(cr && cr.cost || 0) * 100) / 100 });
         } catch(e) {
+          /* A MISSING DAY OF COGS IS NOT A SMALLER ANSWER, IT IS A WRONG ONE — and it is wrong in
+             the flattering direction: less cost subtracted means Gross Profit reads HIGH. So a
+             store whose settled month arrived but whose today did not still counts as missing.
+             Same judgment the frontend already makes for sales with "today pending". */
+          storeOk = false;
+          missingWhy[sales] = "today's closing report: " + e.message;
           Logger.log('getCogsDutchie: today CR failed for ' + dutchie + ': ' + e.message);
         }
       }
     } catch(e) {
+      storeOk = false;
+      missingWhy[sales] = 'settled days: ' + e.message;
       Logger.log('getCogsDutchie: getSalesDaily failed for ' + dutchie + ': ' + e.message);
     }
+    (storeOk ? answered : missing).push(sales);
   }
-  const out = { data: results };
-  // 10 minutes while today is in range, 6 hours once the whole window is settled. A range that ends
-  // in the past cannot change at all, so the only reason not to cache it forever is the sheet being
-  // corrected behind us.
-  try { cacheSet_(cacheKey, JSON.stringify(out), includesToday ? 600 : 21600); } catch (e) {}
+
+  /* The caller must be able to tell a complete answer from a partial one WITHOUT inferring it from
+     the shape of the data — "six stores' worth of rows" is not a thing a reader can count, and a
+     store that sold nothing today is indistinguishable from a store that never answered. */
+  const partial = missing.length > 0;
+  const out = { data: results, partial: partial, stores_answered: answered,
+                stores_missing: missing, missing_reason: missingWhy };
+
+  /* A PARTIAL ANSWER IS RETURNED BUT NEVER PERSISTED, and those are two separate decisions.
+     Returning it is right — the caller asked, some stores answered, and `stores_missing` says which
+     did not, so nothing here is passed off as whole. PERSISTING it is not, because this cache
+     OUTLIVES the blip that caused it: 10 minutes while today is live, SIX HOURS once the window is
+     settled. Freezing a Gross Profit that is short one store's COGS — and therefore reads HIGH —
+     under a freshness claim is how a two-minute Google routing hiccup becomes a wrong number on a
+     screen that gates a bank-deposit reconciliation for the rest of the day.
+     Not caching is also what makes it self-heal: the very next load re-asks every store, including
+     the ones that were never reached, rather than being handed back its own bad afternoon. */
+  if (!partial) {
+    // 10 minutes while today is in range, 6 hours once the whole window is settled. A range that ends
+    // in the past cannot change at all, so the only reason not to cache it forever is the sheet being
+    // corrected behind us.
+    try { cacheSet_(cacheKey, JSON.stringify(out), includesToday ? 600 : 21600); } catch (e) {}
+  }
   return out;
 }
 

@@ -2489,20 +2489,14 @@ function reconDate_(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : '';
 }
 
-// Adds n days to a YYYY-MM-DD string WITHOUT going through the script timezone. Date.UTC keeps the
-// arithmetic in UTC and the result is sliced straight back to text, so no local offset can touch it.
-function reconAddDays_(dateStr, n) {
-  const p = dateStr.split('-').map(Number);
-  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);  // @utc-ok Date.UTC round-trip — built in UTC two lines up
-}
-
-// Day of week for a YYYY-MM-DD, 0=Sun..6=Sat, in UTC for the same reason as above.
-function reconDow_(dateStr) {
-  const p = dateStr.split('-').map(Number);
-  return new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
-}
+/* THE RECON WEEK-WINDOW ARITHMETIC LIVES IN THE BROWSER, not here. reconAddDays_ and reconDow_
+   sat at this spot unused until 2026-09-13: the deposit-week math is done in index.html by
+   reconAddDays / reconDow / reconWindowStart, and the server only ever stores and serves the
+   per-store week-start weekday (getReconConfig_ below). The two server copies were leftovers
+   from before that split, not a second implementation that had drifted — the frontend pair is
+   UTC-based in the same way and carries the same reasoning in its own comment. Deleted rather
+   than kept "in case the math moves back", because an unused copy of date arithmetic is exactly
+   the thing a later reader reaches for without checking which one the app actually runs. */
 
 const RECON_CFG_PROP_   = 'RECON_CONFIG_V1';
 const RECON_STATE_PROP_ = 'RECON_STATE_V1';

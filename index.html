@@ -520,6 +520,11 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 .srow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:0.5px solid var(--border)}
 .srow:last-child{border-bottom:none;padding-bottom:0}
 .swatch{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+/* A store whose figure is not current blinks its dot. See storeNotCurrent_. Reduced motion gets a
+   dimmed dot instead: the state still has to be readable without the movement. */
+@keyframes bdBlink{0%,100%{opacity:1}50%{opacity:.2}}
+.swatch.bd-stale{animation:bdBlink 1.2s ease-in-out infinite}
+@media(prefers-reduced-motion:reduce){.swatch.bd-stale{animation:none;opacity:.35}}
 .sname{font-size:12px;color:var(--text);flex:1}
 .bar-wrap{width:70px;flex-shrink:0}
 .bar-bg{background:var(--bg);border-radius:3px;height:4px}
@@ -1405,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.590';
+const APP_VERSION = 'v2.591';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2470,6 +2475,7 @@ function closeSettings() {
    The buildStoreTray call below is what fixed it. Both dead paths deleted 2026-08-25. */
 function buildStatusGrid(state) {
   _storeStateMap = state;
+  try { syncBdStale_(); } catch (e) {}   // the store dots — a decoration, never worth the load
   buildDskStores();
   // The tray builds fresh on open, so it only needs repainting while it is ALREADY open.
   const _tray = document.getElementById('mob-store-tray');
@@ -5080,6 +5086,54 @@ function animateStorePacingBars(animate) {
 // resorting the list under the reader's eyes.
 let _bdOrder = null;
 
+/* IS THIS STORE'S NUMBER CURRENT? The dot beside its name blinks when it is not.
+ *
+ * Sky, 2026-09-13: "On mobile let's have the bullet next to the store name blink if it's loading so
+ * I can tell if what I'm looking at is loaded/current or not." The shimmer already answers that for a
+ * store with NO figure. It could not answer it for the case that actually misleads: a re-poll keeps
+ * every row's last figure on screen while it re-asks (v2.560, deliberately), so a row that is being
+ * refreshed and a row that just was look identical. Three states are "not current", and they are
+ * one signal because they ask the same thing of the reader — don't take this figure as final yet:
+ *
+ *   loading — its request for this period is in flight, whether or not an older figure is showing.
+ *   err     — the last request failed; whatever is showing is from before it.
+ *   today pending — the month landed and TODAY did not (_todayPending), which is what put Center at
+ *             $0 in Sky's screenshot the same evening. Only while the view actually includes today:
+ *             the set is not cleared by a load that never reaches today, so an August view would
+ *             otherwise blink a store for a September miss.
+ *
+ * Not "idle": before the first load starts there is no request to be waiting on. */
+const BD_BLINK_MS = 1200;
+function viewIncludesToday_() {
+  const r = periodRange(), t = laDay();
+  return toDateStr(r.from) <= t && t <= toDateStr(r.to);
+}
+function storeNotCurrent_(s) {
+  const st = _storeStateMap && _storeStateMap[s];
+  if (st === 'loading' || st === 'err') return true;
+  return _todayPending.has(s) && viewIncludesToday_();
+}
+/* Every render replaces the rows (patchEl sets innerHTML), which would restart the animation from
+ * its first frame on each store landing — a blink that stutters every few hundred ms reads as a
+ * glitch, not a state. A negative delay taken off one shared clock puts every new dot at the phase
+ * the old one was at, so the blink runs continuously through the rebuilds. */
+function _bdBlinkDelay_() { return `animation-delay:-${Math.round(performance.now() % BD_BLINK_MS)}ms`; }
+function _bdSwatchAttrs_(s, col) {
+  const on = storeNotCurrent_(s);
+  return `class="swatch${on ? ' bd-stale' : ''}" data-bd-store="${escHtml(s)}" style="background:${col};flex-shrink:0${on ? ';' + _bdBlinkDelay_() : ''}"`;
+}
+/* State moves between renders — a load STARTS with buildStatusGrid and no render at all — so the
+ * existing dots are toggled in place as well. Without this a poll would not blink anything until its
+ * first store landed, which is most of the wait it is meant to show. */
+function syncBdStale_() {
+  document.querySelectorAll('[data-bd-store]').forEach(el => {
+    const on = storeNotCurrent_(el.getAttribute('data-bd-store'));
+    if (on === el.classList.contains('bd-stale')) return;
+    el.classList.toggle('bd-stale', on);
+    el.style.animationDelay = on ? `-${Math.round(performance.now() % BD_BLINK_MS)}ms` : '';
+  });
+}
+
 function _storeBreakdownRows(stores, storeNets, isClosed, elapsedPct, yr, daysInMo) {
   // NOT filtered to the stores that have arrived. Every store is a row immediately, pending or not.
   // Building the list as data came in meant the section changed height six times per load, and
@@ -5153,7 +5207,7 @@ function _incomeBreakdownMobHtml(stores, storeNets, isClosed, elapsedPct, yr, da
   const rows = _bdApplyOrder(_storeBreakdownRows(stores, storeNets, isClosed, elapsedPct, yr, daysInMo));
   return rows.map(({s, st, col, snet, sPeriodGoal, sGoalPct, sFillCls, sFillStyle, sBarW, sPacePos, diff, pending}) =>
     `<div class="ic-bd-row${pending ? ' bd-pending' : ''}">
-      <div class="swatch" style="background:${col}"></div>
+      <div ${_bdSwatchAttrs_(s, col)}></div>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:500;color:var(--text)">${st?.display||s}</div>
         ${sPeriodGoal > 0 ? `<div class="sbar-wrap" style="margin-top:5px">
@@ -5194,7 +5248,7 @@ function _incomeBreakdownDskHtml(stores, storeNets, isClosed, elapsedPct, yr, da
     ${rows.map(({s, st, col, snet, sPeriodGoal, sGoalPct, sFillCls, sFillStyle, sBarW, sPacePos, diff, pending}) =>
       `<div class="ic-dsk-bd-row${cmp}${pending ? ' bd-pending' : ''}">
         <div class="ic-dsk-bd-store">
-          <div class="swatch" style="background:${col};flex-shrink:0"></div>
+          <div ${_bdSwatchAttrs_(s, col)}></div>
           <span>${st?.display||s}</span>
         </div>
         <div class="ic-dsk-bd-bar-col">

@@ -486,6 +486,23 @@ because the route crosses to GX Core with its own 60s budget (measured 21s / 35s
 night, against 1.5s of Core-side work). The phone had no bug trigger outside Income; `#mob-bug-foot`
 now sits under every other tab. `tests/recon_load_resilience_test.js`.
 
+## A store's dot BLINKS while its figure is not current (v2.591, 2026-09-13)
+
+Sky: *"have the bullet next to the store name blink if it's loading so I can tell if what I'm
+looking at is loaded/current or not."* A re-poll keeps each row's last figure on screen while it
+re-asks, so "being refreshed" and "just refreshed" looked identical. `storeNotCurrent_` is the one
+definition: state `loading` or `err`, or in `_todayPending` **while the view includes today** (the
+set is not cleared by loads that never reach today, so an August view would blink for a September
+miss). Mobile and desktop rows share it.
+
+- **`syncBdStale_` runs from `buildStatusGrid`**, because a load STARTS with that call and no render —
+  without it a poll blinks nothing until its first store lands.
+- **The blink keeps its phase across rebuilds** (negative `animation-delay` off `performance.now()`):
+  `patchEl` replaces the rows on every store landing, which otherwise restarts the animation and
+  reads as a stutter. Reduced motion gets a dimmed dot, not no signal.
+- Measured on the live backend: a poll set all six blinking at 0s and cleared each as it landed
+  (five by 2.9s, Hillsboro at 17.8s). `tests/store_dot_blink_test.js`, verified by mutation.
+
 ## Two load-bearing render rules, both learned the hard way
 
 - **A render fault must never kill a data load.** `loadAllStores()` had `try/finally` with no

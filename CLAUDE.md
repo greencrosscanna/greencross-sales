@@ -462,6 +462,30 @@ this tab's own data.
 floor (4.9–10.8s each, in parallel, wall clock ~11s to the last one) and no client change moves
 them; the server-side 90s intraday cache is working; and River was unremarkable in this load.
 
+## The all-weekdays chart's year is KEPT between visits (v2.590, 2026-09-13)
+
+Sky, 2026-09-13: *"performance has degraded. why isn't 'all sunday's' cached?"* It was not. v2.586
+cut the backfill to one whole-year request per store and dropped its only localStorage write, so
+every visit re-fetched every store's year — and only after the slowest live store answered.
+
+- **Kept per store/year as the day rows exactly as they arrived** (`gc_sales_v2_hist_<store>_<year>_all`),
+  never re-summed into a month payload. Year second-to-last so the prior-year eviction retires it.
+- **Two ages, deliberately different.** Under **1h** (`SALES_TTL_HIST`) it is trusted and the
+  backfill asks for nothing. Under **72h** (`SALES_HIST_PAINT_MAX`) it is painted at boot
+  (`hydrateSalesHistory_`) AND re-asked. Older is not painted — days-stale rows feed Reconcile's
+  expected totals.
+- **Once painted, "the month is in `allDailyData`" no longer means "current".** Months a kept entry
+  covers are re-asked regardless of memory; that is the half a simplification would break.
+- Measured in the browser: warm reload, all 243 days per store in memory ~2s in, **zero** year
+  requests; with the entry aged 2h, painted immediately and all six rewritten 4s later.
+  `tests/backfill_request_count_test.js` cases 14-21, each verified by mutation.
+
+**Reconcile's deposit load goes through `gasFetchJson(url, 3, 75000)`** — it was a bare fetch, and
+one /exec bounce put Safari's *"The string did not match the expected pattern"* on the card. 75s
+because the route crosses to GX Core with its own 60s budget (measured 21s / 35s / >60s the same
+night, against 1.5s of Core-side work). The phone had no bug trigger outside Income; `#mob-bug-foot`
+now sits under every other tab. `tests/recon_load_resilience_test.js`.
+
 ## Two load-bearing render rules, both learned the hard way
 
 - **A render fault must never kill a data load.** `loadAllStores()` had `try/finally` with no

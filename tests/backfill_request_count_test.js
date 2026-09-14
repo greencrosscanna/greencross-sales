@@ -82,10 +82,12 @@ function daysOf(year, month) {
 }
 
 /** Run the SHIPPED backfill against fakes, returning what it asked the network for. */
-function run({ cachedMonths = {}, activeYear = 2026, stores = STORES, seeded = {}, fetchFails = new Set() } = {}) {
+function run({ cachedMonths = {}, activeYear = 2026, stores = STORES, seeded = {}, fetchFails = new Set(), history = {} } = {}) {
   const requests = [];       // every URL handed to gasFetchJson
   const cacheReads = [];     // every (store, year, month) asked of localStorage
   const cacheWrites = [];
+  const histWrites = [];     // every writeSalesHistory(store, year, from, to, rows)
+  const HOUR = 60 * 60 * 1000;
   const allDailyData = JSON.parse(JSON.stringify(seeded));
   let renders = 0, statusGrids = 0;
   let inflight = 0, peakInflight = 0;
@@ -110,6 +112,15 @@ function run({ cachedMonths = {}, activeYear = 2026, stores = STORES, seeded = {
       return d ? { daily: d, netSales: 1, phase: 'both' } : null;
     },
     writeSalesCache: (store, year, month) => { cacheWrites.push(`${store}|${year}|${month}`); },
+    SALES_TTL_HIST: HOUR,
+    SALES_HIST_PAINT_MAX: 72 * HOUR,
+    // history: { store: { year, from, to, ageMs, daily } }
+    readSalesHistory: (store, year) => {
+      const h = history[store];
+      if (!h || h.year !== year) return null;
+      return { from: h.from, to: h.to, daily: h.daily, ts: NOW.getTime() - h.ageMs };
+    },
+    writeSalesHistory: (store, year, from, to, rows) => { histWrites.push({ store, year, from, to, n: rows.length }); },
     mergeDailyData: (storeName, arr) => {
       if (!allDailyData[storeName]) allDailyData[storeName] = {};
       for (const d of (arr || [])) allDailyData[storeName][d.date] = d;
@@ -141,7 +152,7 @@ function run({ cachedMonths = {}, activeYear = 2026, stores = STORES, seeded = {
   vm.createContext(ctx);
   vm.runInContext(grab('backfillDailyHistory'), ctx);
   return ctx.backfillDailyHistory(PROXY).then(() => ({
-    requests, cacheReads, cacheWrites, allDailyData, renders, statusGrids, peakInflight,
+    requests, cacheReads, cacheWrites, histWrites, allDailyData, renders, statusGrids, peakInflight,
   }));
 }
 
@@ -289,6 +300,106 @@ console.log('\n13. the source no longer claims historical months are never persi
   ok('the live measurement that justifies this shape is recorded above it',
      /44\.6 SECONDS/.test(preamble) && /48 requests/.test(preamble));
   ok('and so is the reason the pool is not the lever', /2026-09-06/.test(preamble));
+}
+
+/* ── 14-19. THE YEAR IS KEPT BETWEEN VISITS ───────────────────────────────────────────────────────
+ *
+ * Sky, 2026-09-13: "performance has degraded. why isn't 'all sunday's' cached?" Case 9 above is why:
+ * v2.586 wrote nothing back, so every visit re-fetched every store's year, after the slowest live
+ * store. The answer is now kept per store/year as day rows (still never a synthesized month). */
+const yearKept = (ageMs, to = '2026-08-31') => {
+  const h = {};
+  let daily = [];
+  for (let m = 1; m <= 8; m++) daily = daily.concat(daysOf(2026, m));
+  daily = daily.filter(d => d.date <= to);
+  for (const s of STORES) h[s.name] = { year: 2026, from: '2026-01-01', to, ageMs, daily };
+  return h;
+};
+
+console.log('\n14. a successful backfill keeps each store\'s whole span');
+{
+  const r = await run();
+  eq('one kept year per store', r.histWrites.map(w => w.store).sort(), STORES.map(s => s.name).sort());
+  eq('spanning Jan 1 through the end of August', [...new Set(r.histWrites.map(w => w.from + '..' + w.to))], ['2026-01-01..2026-08-31']);
+  eq('carrying every day of it', [...new Set(r.histWrites.map(w => w.n))], [243]);
+}
+{
+  const cachedMonths = {};
+  for (const s of STORES) { cachedMonths[s.name] = {}; for (let m = 1; m <= 5; m++) cachedMonths[s.name][m] = daysOf(2026, m); }
+  const r = await run({ cachedMonths });
+  eq('a partly month-cached year still keeps the WHOLE span, not just the fetched months',
+     [...new Set(r.histWrites.map(w => w.from + '..' + w.to + ':' + w.n))], ['2026-01-01..2026-08-31:243']);
+}
+
+console.log('\n15. a FRESH kept year costs nothing');
+{
+  const r = await run({ history: yearKept(10 * 60 * 1000) });
+  eq('zero requests', r.requests.length, 0);
+  eq('and the chart has the whole year', [...new Set(STORES.map(s => Object.keys(r.allDailyData[s.name] || {}).length))], [243]);
+  eq('nothing rewritten', r.histWrites.length, 0);
+}
+
+console.log('\n16. a STALE kept year is shown AND re-asked — memory holding it is not "current"');
+{
+  // Boot already merged it (hydrateSalesHistory_), so memory is seeded with the same rows.
+  const history = yearKept(2 * 60 * 60 * 1000);
+  const seeded = {};
+  for (const s of STORES) { seeded[s.name] = {}; for (const d of history[s.name].daily) seeded[s.name][d.date] = d; }
+  const r = await run({ history, seeded });
+  eq('all six re-asked', r.requests.length, 6);
+  eq('for the full span, not skipped because memory had it', [...new Set(r.requests.map(spanOf))], ['2026-01-01..2026-08-31']);
+  eq('and rewritten fresh', r.histWrites.length, 6);
+}
+
+console.log('\n17. a fresh entry that does not cover the span is not trusted');
+{
+  const r = await run({ history: yearKept(5 * 60 * 1000, '2026-07-31') });
+  eq('six requests', r.requests.length, 6);
+  eq('re-asking the whole span the entry covered too', [...new Set(r.requests.map(spanOf))], ['2026-01-01..2026-08-31']);
+}
+
+console.log('\n18. a failed re-ask keeps the older rows on screen and does not overwrite the entry');
+{
+  const r = await run({ history: yearKept(3 * 60 * 60 * 1000), fetchFails: new Set(['River']) });
+  eq('River keeps its kept year', Object.keys(r.allDailyData.River || {}).length, 243);
+  ok('and River\'s entry was not rewritten', !r.histWrites.some(w => w.store === 'River'));
+  eq('the other five were rewritten', r.histWrites.length, 5);
+}
+
+console.log('\n19. an entry older than the paint window is not shown');
+{
+  const r = await run({ history: yearKept(80 * 60 * 60 * 1000), fetchFails: new Set(['River']) });
+  eq('River, failing, has no bars rather than days-old ones', Object.keys(r.allDailyData.River || {}).length, 0);
+}
+
+console.log('\n20. boot hydration: paint within 72h, never older');
+{
+  const ctx = {
+    STORES, SALES_HIST_PAINT_MAX: 72 * 3600000, Date: class extends Date { static now() { return NOW.getTime(); } },
+    allDailyData: {},
+    readSalesHistory: (store) => ({
+      Bend:   { daily: daysOf(2026, 8), ts: NOW.getTime() - 50 * 3600000 },
+      Center: { daily: daysOf(2026, 8), ts: NOW.getTime() - 80 * 3600000 },
+    }[store] || null),
+  };
+  ctx.mergeDailyData = (n, arr) => { ctx.allDailyData[n] = ctx.allDailyData[n] || {}; for (const d of arr) ctx.allDailyData[n][d.date] = d; };
+  vm.createContext(ctx);
+  vm.runInContext(grab('hydrateSalesHistory_'), ctx);
+  ctx.hydrateSalesHistory_(2026);
+  eq('a 50h-old year paints', Object.keys(ctx.allDailyData.Bend || {}).length, 31);
+  eq('an 80h-old year does not', Object.keys(ctx.allDailyData.Center || {}).length, 0);
+  ok('hydration runs in the init block before the first render',
+     /selectDefaultPeriod_\(\);[^\n]*\n[^\n]*hydrateSalesHistory_\(activeYear\)[^\n]*\nbuildTimeNav\(\)/.test(HTML));
+}
+
+console.log('\n21. the key retires with the year and clears with "Clear cache"');
+{
+  const ctx = { SALES_CACHE_VER: 'v2' };
+  vm.createContext(ctx);
+  vm.runInContext(grab('salesHistKey') + grab('isSalesCacheKey_'), ctx);
+  const k = ctx.salesHistKey('Portland Rd', 2025);
+  eq('year is the second-to-last segment, where the prior-year sweep reads it', k.split('_').slice(-2)[0], '2025');
+  ok('and it is a sales cache key', ctx.isSalesCacheKey_(k));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

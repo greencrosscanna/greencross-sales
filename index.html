@@ -546,6 +546,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 .last-sync{font-size:10px;color:var(--muted);text-align:center;margin-top:4px;margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px}
 .bug-inline{background:none;border:none;cursor:pointer;font-size:10px;color:var(--muted);padding:0;font-family:inherit;-webkit-tap-highlight-color:transparent}
 .bug-inline:hover{color:var(--text)}
+.mob-bug-foot{text-align:center;margin:4px 0 16px}
 .empty-state{font-size:12px;color:var(--muted);text-align:center;padding:20px 0}
 .spinner-inline{display:inline-block;width:12px;height:12px;border:2px solid var(--border-strong);border-top-color:var(--green);border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -825,6 +826,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   .mob-overlay{display:none!important}
   .mob-tray{display:none!important}
   .bug-inline{display:none}
+  .mob-bug-foot{display:none}
   /* Show new desktop sidebar elements */
   .dsk-logo-row{display:flex}
   .dsk-nav{display:flex}
@@ -1162,6 +1164,9 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
     <div id="main-content">
       <div class="empty-state"><span class="spinner-inline"></span>Connecting…</div>
     </div>
+    <!-- The phone has no floating bug button (the bottom bar sits where it would), so every tab but
+         Income, which renders its own, gets this link under its content. See syncMobBugFoot_. -->
+    <div class="mob-bug-foot" id="mob-bug-foot" hidden><button class="bug-inline" onclick="openBugModal()" title="Report a bug">🐞 Report a bug</button></div>
   </div>
 
 </div>
@@ -1400,7 +1405,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.589';
+const APP_VERSION = 'v2.590';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2596,6 +2601,69 @@ function writeSalesCache(store, year, month, data) {
   }
 }
 
+/* ── The year of settled days behind the all-weekdays chart, kept between visits ──────────────────
+ *
+ * Sky, 2026-09-13: "performance has degraded. why isn't 'all sunday's' cached?" — and it was not.
+ * v2.586 cut the backfill from 48 requests to 6 by asking for a store's whole year at once, and in
+ * doing so dropped the only localStorage write it had: a multi-month answer is not a month payload,
+ * so nothing was persisted at all. Every page load after that re-fetched the entire year for every
+ * store, and it could not even START until the slowest of the six live stores had answered, because
+ * the backfill runs at the end of loadAllStores. On a bad GX Core evening (measured the same night:
+ * 12% of round trips failing, 9.9s average) that is the chart sitting empty for as long as the
+ * worst store takes, every single time the app is opened.
+ *
+ * So the backfill's answer is kept per store, per year, under its own key — the day rows exactly as
+ * they arrived, never re-summed into a month payload (the reason v2.586 gave for not caching, and
+ * still the right one). Two ages matter, and they are deliberately different:
+ *
+ *   SALES_TTL_HIST (1h) — FRESH. Inside it the backfill trusts the entry and asks for nothing. Same
+ *     window a cached month already gets, for the same reason: past days DO change (retroactive
+ *     returns land weeks later), so a correction must not linger.
+ *   SALES_HIST_PAINT_MAX (72h) — PAINTABLE. Past freshness but inside this, the rows are merged at
+ *     boot so the chart draws on the FIRST frame, and the backfill still re-asks and replaces them.
+ *     Stale-then-refresh, not stale-instead-of-refresh. 72h rather than 24h so a Monday open after a
+ *     weekend away still paints. Older than that is not painted: a figure days out of date feeding
+ *     a Reconcile expected-total is not worth an instant chart.
+ *
+ * Key shape gc_sales_<ver>_hist_<store>_<year>_all keeps the YEAR second-to-last, so
+ * evictHistoricalSalesCache's prior-year sweep retires these exactly as it retires months, and the
+ * gc_sales_ prefix puts them under isSalesCacheKey_, so "Clear cache" really clears them. */
+const SALES_HIST_PAINT_MAX = 72 * 60 * 60 * 1000;
+function salesHistKey(store, year) { return `gc_sales_${SALES_CACHE_VER}_hist_${store}_${year}_all`; }
+
+function readSalesHistory(store, year) {
+  try {
+    const entry = JSON.parse(localStorage.getItem(salesHistKey(store, year)) || 'null');
+    if (!entry || !Array.isArray(entry.daily) || !entry.ts) return null;
+    return entry;
+  } catch { return null; }
+}
+
+function writeSalesHistory(store, year, from, to, daily) {
+  const payload = JSON.stringify({ from, to, daily, ts: Date.now() });
+  const key = salesHistKey(store, year);
+  try { localStorage.setItem(key, payload); return; } catch (e) {}
+  // Full: expired MONTH entries are the dead weight (v2.586 stopped refreshing them, so the old
+  // backfill's 48 sit there expired and unread). Drop those and try once more. Still dispensable —
+  // a failed write costs the next visit a fetch, never a number.
+  try {
+    Object.keys(localStorage).forEach(k => {
+      if (!isSalesCacheKey_(k) || k.includes('_hist_')) return;
+      try { if (Date.now() - JSON.parse(localStorage.getItem(k)).ts > SALES_TTL_HIST) localStorage.removeItem(k); }
+      catch { localStorage.removeItem(k); }
+    });
+    localStorage.setItem(key, payload);
+  } catch (e2) { console.warn('[cache] year history not saved:', e2.message); }
+}
+
+/* Called once in the init block, before the first render, for the year on screen. */
+function hydrateSalesHistory_(year) {
+  for (const store of STORES) {
+    const h = readSalesHistory(store.name, year);
+    if (h && Date.now() - h.ts <= SALES_HIST_PAINT_MAX) mergeDailyData(store.name, h.daily);
+  }
+}
+
 /* Reset the derived in-memory caches built from liveData / allDailyData — and NOTHING ELSE.
  *
  * This used to also set `_incomeMounted = false`, which forced renderIncome down its full-mount
@@ -2884,14 +2952,34 @@ async function backfillDailyHistory(proxyUrl) {
   const maxMo   = activeYear < curYear ? 12 : curMo - 1; // stop before current month
   const minMo   = 1;
 
+  const spanFrom = monthRange(minMo, activeYear).from;
+  const spanTo   = monthRange(maxMo, activeYear).to;
+
   // One task per STORE, carrying the months that store is still missing.
   const tasks = [];
   for (const store of STORES) {
+    /* The kept year comes first (see readSalesHistory). FRESH and covering the whole span: that
+     * store costs nothing. Otherwise its rows may already be on screen from boot — and because
+     * they are, "the month is in allDailyData" can no longer mean "the month is current". Months
+     * the entry covers are therefore re-asked regardless of what memory holds; only months that
+     * reached memory some other way (a month the reader opened) keep the old skip. */
+    const hist  = maxMo >= minMo ? readSalesHistory(store.name, activeYear) : null;
+    const age   = hist ? Date.now() - hist.ts : Infinity;
+    if (hist && age <= SALES_TTL_HIST && hist.from <= spanFrom && hist.to >= spanTo) {
+      mergeDailyData(store.name, hist.daily);
+      continue;
+    }
+    if (hist && age <= SALES_HIST_PAINT_MAX) mergeDailyData(store.name, hist.daily);
+    const staleCovers = m => {
+      if (!hist) return false;
+      const r = monthRange(m, activeYear);
+      return hist.from <= r.from && hist.to >= r.to;
+    };
     const have = Object.keys(allDailyData[store.name] || {});
     const months = [];
     for (let m = minMo; m <= maxMo; m++) {
       const prefix = activeYear + '-' + String(m).padStart(2, '0');
-      if (have.some(d => d.startsWith(prefix))) continue;
+      if (!staleCovers(m) && have.some(d => d.startsWith(prefix))) continue;
       months.push(m);
     }
     if (months.length) tasks.push({ store, months });
@@ -2927,6 +3015,14 @@ async function backfillDailyHistory(proxyUrl) {
       const d = await gasFetchJson(url, 2, 15000);
       if (!d || d.error) return;
       mergeDailyData(store.name, d.daily);
+      /* Keep the whole span, not just what this answer carried: months that came out of the month
+       * cache are just as settled, and an entry that covered only the fetched months would fail the
+       * covers-the-span test and re-fetch on every visit — the decorative-cache bug again. Only
+       * written after a SUCCESSFUL fetch, so a failed one leaves the older entry to be re-asked. */
+      const rows = Object.values(allDailyData[store.name] || {})
+        .filter(r => r && r.date >= spanFrom && r.date <= spanTo)
+        .sort((a, b) => a.date.localeCompare(b.date));
+      writeSalesHistory(store.name, activeYear, spanFrom, spanTo, rows);
     } catch {}
   };
   await Promise.all(Array.from({ length: Math.min(BACKFILL_POOL, tasks.length) }, async () => {
@@ -4288,7 +4384,19 @@ function salesPending() {
       && loaded > 0 && _todayPending.size >= loaded;
 }
 
+/* Sky, 2026-09-13, from an iPhone on Reconcile: "no bug option on this page". Under 768px the .bug-fab
+ * is hidden, and the only other trigger was the link at the bottom of INCOME, so a phone could file a
+ * bug about every tab except the one that was broken. Shown only once signed in (the fab's own
+ * `visible` class is that signal) and never on Income, which already carries one. */
+function syncMobBugFoot_() {
+  const foot = document.getElementById('mob-bug-foot');
+  if (!foot) return;
+  const signedIn = !!document.getElementById('bug-fab')?.classList.contains('visible');
+  foot.hidden = !signedIn || section === 'income';
+}
+
 function render() {
+  try { syncMobBugFoot_(); } catch (e) {}   // a decoration — must never cost the render
   const sectionChanged = section !== _lastRenderedSection;
   if (sectionChanged) {
     destroyCharts();
@@ -7120,8 +7228,19 @@ async function loadRecon(nocache) {
             + `&start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`
             + `&token=${encodeURIComponent(getToken())}${nocache ? '&nocache=1' : ''}`;
   try {
-    const res  = await fetch(url);
-    const data = await res.json();
+    /* THROUGH gasFetchJson, NOT A BARE fetch. Sky, 2026-09-13, from an iPhone: "Error loading
+     * reconcile tab" — the card read "Couldn't load deposits — The string did not match the expected
+     * pattern." That sentence is Safari's res.json() failing on an HTML body: the /exec second-hop
+     * bounce gasFetchJson exists for, which this loader never went through. One flake and the tab was
+     * dead until someone pressed Try again.
+     *
+     * The ceiling is 75s, not the 30s default, because this route is slow for an honest reason: it
+     * crosses to GX Core server-side with its own 60s retry budget (qbDepositsViaGXCore_). MEASURED on
+     * the live route that night — 21.5s, 35.1s, then a failure past 60s — while GX Core's own
+     * qb_deposits work averaged 1.5s. The time is the hop, not QuickBooks. A 30s cap would abort
+     * requests that were about to succeed, and a parsed {ok:false} after the server's budget is
+     * an ANSWER, which gasFetchJson correctly does not retry. */
+    const data = await gasFetchJson(url, 3, 75000);
     data._range = range;
     reconData = data;
     // Never cache a failure. A cached error would survive the outage that caused it and keep the
@@ -7132,6 +7251,18 @@ async function loadRecon(nocache) {
     // Tagged with the range regardless, so the error renders once instead of re-fetching forever.
     reconData = { ok: false, error: e.message, _range: range };
   }
+}
+
+/* Say what a load failure MEANS, in words. The raw message stays underneath in small type for a bug
+ * report, but "The string did not match the expected pattern" is not something a reader can act on,
+ * and every transport failure here has the same honest answer: the answer did not make it back, and
+ * trying again usually works. A message the server actually sent is its own explanation. */
+function reconLoadErrorText_(err) {
+  const e = String(err || '');
+  if (/timed out|non-JSON|HTTP \d|unreachable|did not match the expected pattern|Failed to fetch|Load failed|NetworkError/i.test(e)) {
+    return 'QuickBooks deposits come through GX Core, and the answer did not make it back. Try again in a minute.';
+  }
+  return '';
 }
 
 // Refresh means refresh: past BOTH caches, this page's and the proxy's, not just re-render.
@@ -7249,10 +7380,16 @@ function renderReconcile(nocache) {
   // is shown, never papered over: a Reconcile tab that renders sales with an empty deposit column
   // reads as "nothing has been banked", which is the one wrong answer this tab must never give.
   if (reconData.ok === false || reconData.error) {
+    const why = reconLoadErrorText_(reconData.error);
+    // The dev-guard hint is for localhost only. On a phone it was a paragraph of code names
+    // underneath the one sentence that mattered.
+    const devHint = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+      ? `<div style="margin-top:6px;opacity:.7;font-size:12px">A <code>[GXDev] BLOCKED</code> message in the console is the LOCAL dev guard, not the backend — an action is missing from <code>GX_DEV_READS</code>.</div>`
+      : '';
     host.innerHTML = `
       <div class="sec-lbl">Deposit reconciliation</div>
-      <div class="card"><div class="empty-state">Couldn't load deposits — ${escHtml(reconData.error || 'unknown error')}
-        <div style="margin-top:6px;opacity:.7;font-size:12px">Deposits come from QuickBooks through GX Core's <code>qb_deposits</code> (live since v216). A <code>[GXDev] BLOCKED</code> message above is the LOCAL dev guard, not the backend — that means an action is missing from <code>GX_DEV_READS</code> in this page's head.</div>
+      <div class="card"><div class="empty-state">Couldn't load deposits. ${escHtml(why)}
+        <div style="margin-top:6px;opacity:.6;font-size:11px">${escHtml(reconData.error || 'unknown error')}</div>${devHint}
         <div style="margin-top:8px"><button class="s-btn" onclick="reloadRecon()">Try again</button></div>
       </div></div>`;
     return;
@@ -8977,6 +9114,7 @@ function startSalesHeartbeat() {
 }
 
 selectDefaultPeriod_();   // BEFORE buildTimeNav and before the boot block's loadAllStores
+try { hydrateSalesHistory_(activeYear); } catch (e) {}   // the all-weekdays chart draws on the first frame
 buildTimeNav();
 buildStoreTabs();
 buildStatusGrid({});

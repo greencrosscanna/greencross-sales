@@ -1427,9 +1427,22 @@ non-superadmin grant to revoke. The risk is all on the other side: flip it now a
 granted meets a live fail-closed gate on day one, with no evidence it admits anyone but the deployer. Log
 mode costs nothing and collects exactly the evidence that removes that risk.
 
-Still true and worth keeping separately: this app has a **local-login fallback** (`gc_sales_users`, which
-holds only `sky`), so "signed in" and "holds a grant" are two different statements here where for Inventory
-they are one. That is a real hazard for any grant check, just not the reason Shawn returned null.
+*No longer true since v2.594:* this app HAD a **local-login fallback** (`gc_sales_users`, holding only
+`sky`), so "signed in" and "holds a grant" were two different statements here. See the sign-in section below.
+
+**SIGN-IN IS GX CORE ONLY, AND RENEWAL RE-CHECKS THE GRANT (v2.594, 2026-09-14, Sky's call).** Two ways
+in skipped the Command Center. (1) `loginUser` retried ANY `GXCore.login` refusal against `gc_sales_users`,
+so an old Sales password for `sky` kept working after the Command Center password changed. The fallback
+is deleted outright, **including for a Core outage**: this app shows nothing without GX Core, and issued
+sessions validate here on the shared secret, so an outage costs new sign-ins only. Don't re-add a
+"temporary" one — same reasoning as the QuickBooks local path. (2) The 10-minute `ping` minted a fresh
+7-day token from a signature alone, so a removed person stayed signed in while their tab was open.
+`pingSession_` now refuses when `roleForApp` answers null (client signs out within ~10 min), and **still
+renews on a Core ERROR** — failing that closed signs the office out on every bounce, and writes are failed
+closed by `writeGuard_` regardless. *Not closed:* a token copied out of a browser still reads for up to
+its 7-day expiry, because read routes check the signature, not the grant. `tests/login_core_only_test.js`
+(20 assertions, 12 fail against the pre-fix source). The `gc_sales_users` PROPERTY may still exist on the
+script (authprobe `local_users`); nothing reads it for sign-in, and deleting it is safe.
 
 **Flip or roll back the guard by curl — `action=guardmode`, no editor needed.** This exists for ROLLBACK,
 not convenience: the guard arms a fail-closed auth gate, so a revert must be seconds away and must not

@@ -399,7 +399,9 @@ function probeMark_(label, ms, extra) {
 // issued by GXCore.login() validates identically in requireAuth_() here.
 const GC_SESSION_SECRET_KEY = 'GC_SESSION_SECRET'; // MUST match GXCore + Inventory
 const GC_SESSION_TTL_MS     = 7 * 24 * 60 * 60 * 1000; // 7 days
-const GC_USERS_KEY          = 'gc_sales_users';    // local fallback user store
+// gc_sales_users (the old local password store) is no longer read for sign-in — see loginUser. The
+// key stays named so authprobe can report a leftover property rather than it being forgotten.
+const GC_USERS_KEY          = 'gc_sales_users';
 
 function sessionSecret_() {
   const props = PropertiesService.getScriptProperties();
@@ -413,20 +415,9 @@ function sessionSecret_() {
   return secret;
 }
 
-function hashPass_(pass) {
-  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(pass));
-  return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
-}
-
 function signSession_(payload) {
   const sig = Utilities.computeHmacSha256Signature(payload, sessionSecret_());
   return Utilities.base64EncodeWebSafe(sig);
-}
-
-function issueSessionToken_(user) {
-  const exp = Date.now() + GC_SESSION_TTL_MS;
-  const payload = [String(user).toLowerCase().trim(), exp].join(':');
-  return payload + ':' + signSession_(payload);
 }
 
 function validateSessionToken_(token) {
@@ -551,31 +542,46 @@ function requireAuth_(params) {
 
 // Phase-2 shared sign-on: validate through GXCore (which checks app access grant),
 // with a local fallback so a GXCore hiccup never locks anyone out.
+// SIGN-IN GOES THROUGH GX CORE ONLY (2026-09-14, Sky's call). Until then a refusal from GXCore.login
+// fell through to this app's own password store, gc_sales_users — on ANY refusal, not only an outage.
+// Its only account was `sky`, so an old Sales password for the superadmin kept working after the Command
+// Center password changed, and a wrong-password or revoked answer from Core was simply retried against a
+// list Core cannot see. There is no fallback now, including for an outage: this app shows nothing without
+// GX Core (stores, settled sales, goals all come from it), and sessions already issued are unaffected
+// because tokens are validated here against the shared secret.
 function loginUser(params) {
-  try {
-    if (typeof GXCore !== 'undefined' && GXCore && GXCore.login) {
-      const r = GXCore.login(params.user, params.pass, 'sales');
-      if (r && r.ok) return r;
-      const local = _loginUserLocal_(params);
-      if (local && local.ok) return local;
-      return r;
-    }
-  } catch(e) {
-    Logger.log('[Sales login/GXCore] ' + e.message);
+  if (typeof GXCore === 'undefined' || !GXCore || typeof GXCore.login !== 'function') {
+    return { ok: false, error: 'Sign-in unavailable — GX Core is not connected', code: 'unavailable' };
   }
-  return _loginUserLocal_(params);
+  try {
+    return GXCore.login(params.user, params.pass, 'sales');
+  } catch (e) {
+    Logger.log('[Sales login/GXCore] ' + e.message);
+    return { ok: false, error: 'Sign-in unavailable — GX Core did not answer. Try again in a minute.', code: 'unavailable' };
+  }
 }
 
-function _loginUserLocal_(params) {
-  if (!params.user || !params.pass) return { ok: false, error: 'Missing credentials' };
-  const props = PropertiesService.getScriptProperties();
-  const users = JSON.parse(props.getProperty(GC_USERS_KEY) || '{}');
-  const key   = String(params.user).toLowerCase().trim();
-  const hash  = hashPass_(String(params.pass));
-  if (hasOwn_(users, key) && users[key] === hash) {
-    return { ok: true, user: key, token: issueSessionToken_(key), expiresAt: new Date(Date.now() + GC_SESSION_TTL_MS).toISOString() };
+// SESSION RENEWAL RE-CHECKS THE GRANT. The client pings every 10 minutes and each ping minted a fresh
+// 7-day token from nothing but a valid signature — so someone removed in the Command Center stayed
+// signed in for as long as a tab stayed open. A definitive "no Sales role" now refuses the renewal and
+// the client signs out. A GX Core ERROR still renews: failing this closed would sign everyone out during
+// a Core hiccup, and writes are separately failed closed by writeGuard_.
+function pingSession_(params) {
+  const pAuth = requireAuth_(params);
+  if (!pAuth.ok) return { ok: false, error: pAuth.error };
+  let role = null, checked = false;
+  try {
+    if (typeof GXCore !== 'undefined' && GXCore && typeof GXCore.roleForApp === 'function') {
+      role = GXCore.roleForApp(String(pAuth.user || '').toLowerCase().trim(), 'sales');
+      checked = true;
+    }
+  } catch (e) {
+    Logger.log('[Sales ping/roleForApp] ' + e.message);
   }
-  return { ok: false, error: 'Invalid username or password' };
+  if (checked && !role) return { ok: false, error: 'No access to Sales', code: 'no_access' };
+  const newExp = Date.now() + GC_SESSION_TTL_MS;
+  const payload = pAuth.user + ':' + newExp;
+  return { ok: true, token: payload + ':' + signSession_(payload), expiresAt: new Date(newExp).toISOString() };
 }
 
 function doGet(e) {
@@ -1151,13 +1157,7 @@ function doGet(e) {
     return jsonOut_(loadProbe_(params));
   }
 
-  if (params.action === 'ping') {
-    const pAuth = requireAuth_(params);
-    if (!pAuth.ok) return jsonOut_({ ok: false, error: pAuth.error });
-    const newExp = Date.now() + GC_SESSION_TTL_MS;
-    const payload = pAuth.user + ':' + newExp;
-    return jsonOut_({ ok: true, token: payload + ':' + signSession_(payload), expiresAt: new Date(newExp).toISOString() });
-  }
+  if (params.action === 'ping') return jsonOut_(pingSession_(params));
 
   // ── Auth gate — all data actions require a valid session ─
   const auth = requireAuth_(params);

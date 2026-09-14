@@ -54,7 +54,10 @@ function load(gxcore) {
 let pass = 0, fail = 0;
 const ok = (c, l) => { if (c) { pass++; console.log('  PASS  ' + l); } else { fail++; console.log('  FAIL  ' + l); } };
 const reset = mode => { PROPS = {}; if (mode) PROPS['GX_WRITE_GUARD'] = mode; };
-const roleFn = table => ({ roleForApp: (u, app) => (app === 'sales' ? (table[u] || null) : null) });
+// roleCanEdit mirrors GX Core's GX_EDIT_ROLES allowlist (gx_core.gs) — own-key, unknown roles read-only.
+const EDIT_ROLES = { editor: 1, admin: 1, director: 1, manager: 1 };
+const canEditFn = r => Object.prototype.hasOwnProperty.call(EDIT_ROLES, String(r || '').toLowerCase());
+const roleFn = table => ({ roleForApp: (u, app) => (app === 'sales' ? (table[u] || null) : null), roleCanEdit: canEditFn });
 
 // ── 1. enforce: the live configuration ───────────────────────────────────────
 console.log('\n1. enforce — a granted user writes, an ungranted one does not');
@@ -77,6 +80,36 @@ console.log('\n2. enforce — case and whitespace must not decide access');
   reset('enforce');
   ok(S.writeGuard_('  SHAWN  ', 'set_revenue').ok === true, '"  SHAWN  " resolves to shawn');
   ok(S.writeGuard_('Shawn', 'set_revenue').ok === true, 'mixed case resolves');
+}
+
+// ── 2b. THE BUG: a role is not permission to write ─────────────────────────────
+console.log('\n2b. enforce — a VIEWER grant is refused (bug: any role used to admit every write)');
+{
+  const S = load(roleFn({ vic: 'viewer', odd: 'constructor', mgr: 'manager', sky: 'admin' }));
+  reset('enforce');
+  const v = S.writeGuard_('vic', 'set_revenue');
+  ok(v.ok === false, 'a viewer is refused a write');
+  ok(v.code === 'read_only', 'with code read_only — not no_access, the grant is real');
+  ok(/read-only/i.test(v.error), 'and a message saying the access is read-only');
+  ok(S.writeGuard_('odd', 'set_recon').ok === false, 'an unknown role fails safe to read-only');
+  ok(S.writeGuard_('mgr', 'apply_budget').ok === true, 'a manager is admitted');
+  ok(S.writeGuard_('sky', 'apply_budget').ok === true, 'the superadmin (admin) is admitted');
+
+  const M = load({ roleForApp: () => 'editor' });   // pin without roleCanEdit
+  reset('enforce');
+  const m = M.writeGuard_('shawn', 'set_revenue');
+  ok(m.ok === false, 'a pin without roleCanEdit refuses rather than trusting the role');
+  ok(/unavailable/i.test(m.error), 'and says the check is unavailable');
+
+  const T = load({ roleForApp: () => 'editor', roleCanEdit: () => { throw new Error('boom'); } });
+  reset('enforce');
+  ok(T.writeGuard_('shawn', 'set_revenue').ok === false, 'a throwing roleCanEdit fails closed');
+
+  reset('log');
+  const L = S.writeGuard_('vic', 'set_revenue');
+  ok(L.ok === true && L.would_refuse === true, 'log mode admits a viewer but records would_refuse');
+  const tally = JSON.parse(PROPS['GX_WRITE_GUARD_TALLY'] || '{}');
+  ok(tally.refused_read_only === 1 && !tally.admitted, 'the tally counts it as refused_read_only, never admitted');
 }
 
 // ── 3. THE fail-closed case ──────────────────────────────────────────────────

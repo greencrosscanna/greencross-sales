@@ -487,14 +487,33 @@ function writeGuard_(user, action) {
     err = e.message;
   }
 
-  recordGuard_(props, { user: user, action: action, role: role || null, err: err || null });
+  // HOLDING A ROLE IS NOT PERMISSION TO WRITE. Until 2026-09-14 this asked only whether the user had
+  // ANY Sales role, so a `viewer` grant admitted every write in `enforce` — revenue lines, budgets,
+  // reconciliation. Measured live before the fix: GX Core's read-only dev session (role viewer) got
+  // past this guard on set_recon and was stopped only by a deliberately invalid date.
+  // The edit test is GXCore.roleCanEdit, never a local list (suite rule: an allowlist in one place,
+  // unknown roles fail safe to read-only). A pin without it cannot tell editor from viewer, so it
+  // counts as a Core error and fails closed like one.
+  let canEdit = false;
+  if (role && !err) {
+    try {
+      if (typeof GXCore.roleCanEdit !== 'function') err = 'roleCanEdit unavailable at this pin';
+      else canEdit = !!GXCore.roleCanEdit(role);
+    } catch (e) {
+      err = e.message;
+    }
+  }
+
+  recordGuard_(props, { user: user, action: action, role: role || null, can_edit: canEdit, err: err || null });
 
   // Fail CLOSED when enforcing, including on a Core error. We fail open everywhere else so a Core
   // hiccup never blanks a board, but failing open on an AUTH check means no check at all.
-  if (mode === 'enforce' && !role) {
-    return { ok: false, mode: mode, error: err ? 'Access check unavailable' : 'No access to Sales', code: 'no_access' };
+  if (mode === 'enforce' && !canEdit) {
+    if (err)  return { ok: false, mode: mode, error: 'Access check unavailable', code: 'no_access' };
+    if (role) return { ok: false, mode: mode, role: role, error: 'Your Sales access is read-only', code: 'read_only' };
+    return { ok: false, mode: mode, error: 'No access to Sales', code: 'no_access' };
   }
-  return { ok: true, mode: mode, role: role || null, would_refuse: !role };
+  return { ok: true, mode: mode, role: role || null, can_edit: canEdit, would_refuse: !canEdit };
 }
 
 function recordGuard_(props, entry) {
@@ -513,7 +532,7 @@ function recordGuard_(props, entry) {
     // monotonic, so "has a real user ever been admitted" and "did the gate start refusing everyone"
     // stay answerable as numbers long after the detail has rolled away.
     // Shape borrowed from pricecards via inventory so the suite reads the same way.
-    const kind = entry.err ? 'error' : (entry.role ? 'admitted' : 'refused_no_grant');
+    const kind = entry.err ? 'error' : (entry.can_edit ? 'admitted' : (entry.role ? 'refused_read_only' : 'refused_no_grant'));
     const tally = JSON.parse(props.getProperty(GX_WRITE_GUARD_TALLY) || '{}');
     tally[kind] = (tally[kind] || 0) + 1;
     // First admit is stamped once and never overwritten — it is the evidence, not a running value.

@@ -1261,6 +1261,15 @@ the admit test below passed. Reads unaffected; unauthenticated and forged-token 
 the session gate ABOVE the guard, so a signature failure never reaches the grant lookup. **Roll back in one
 command:** the same `guardmode` call with `mode=log`.
 
+**A ROLE IS NOT PERMISSION TO WRITE (fixed v2.593, 2026-09-14).** Until then the guard admitted any
+user holding ANY Sales role, so a `viewer` passed `enforce` on every write. Measured live before the fix:
+GX Core's read-only dev session (`gx-dev`, role viewer) got past the guard on `set_recon` and was stopped
+only by a deliberately invalid date. The guard now also requires `GXCore.roleCanEdit(role)` — never a local
+list — refuses a viewer with `code: read_only`, and treats a pin without `roleCanEdit` as a Core error
+(fail closed). The tally gained `refused_read_only`. **Re-verify after any deploy with that same probe:**
+`dev_session` token → `set_recon&store=Bend&start=not-a-date` must answer `read_only`, not the date error.
+`tests/write_guard_test.js` 2b, verified by mutation (7 assertions fail against the old condition).
+
 **Pinned to GXCore — check the live value, do not trust this line** (`?action=libversion`, or `./gxpins.sh --live` from the hub). Measured **v315** on the live `/exec` on 2026-09-09 (from v310, one bump covering v311-v315); it read *v223 (2026-08-25, from v220)* until 2026-08-29, when the app had moved to v241. That is a reading, not a promise — take your own. The history below is still accurate as history. Two re-pins the
 same day, and the second one is the one that finished the job — see the store-key entry below. Verified
 live after the redeploy: `?action=libversion` → `{"ok":true,"gxcore":223}` six consecutive reads (no

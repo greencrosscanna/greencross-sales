@@ -86,6 +86,33 @@ error.
   `knownStore_`. **The two lists live in different repos and nothing compared them** — that, not the
   spelling, is the defect. Verified to fail against the old gate.
 
+### The store LIST is GX Core's too — a new store is added, not skipped (v2.595, 2026-09-14)
+
+The vocabulary above was fixed; the LIST was not. The six stores were typed out in `index.html` and
+four more times in `dutchie_proxy.gs` (goals by date, the pay-period walk + `attainprobe`, pacing,
+COGS), and the client's registry merge **skipped** any store it did not already know. A store added
+in Command Center would have loaded nowhere, and every total, goal and Gross Profit figure would have
+read one store short — the River shape again. Found by a read-only audit, not by it happening.
+
+- **Backend: `salesStores_()` is the only list.** Registry rows (`gxStoreRegistry_`) → `{core, dutchie,
+  sales}`. `SALES_STORES_FALLBACK_` is used only when the registry cannot answer. Don't add a fifth copy.
+- **Frontend: `addOrUpdateStore_` ADDS unknown stores** to `STORES` / `STORE_MAP` / `STORE_TO_VEL`.
+  The hardcoded `STORES` is the offline fallback. Keep `name` then `display` first on each row: the
+  hub's cross-app contract test parses that shape.
+- **Matched on `store_id`**, which is why `?action=stores` now sends it (cache key `stores_meta_v2`).
+  A Command Center rename updates the row instead of adding a second one.
+- **`sales` (the internal key) is never renamed.** Reconciliation state, caches and deposit rules are
+  written under it. `SALES_KEY_BY_DUTCHIE_` / `GX_DUTCHIE_TO_SALES` hold the one legacy exception
+  (`River Rd` → `River`); a new store keys on its dutchie_name with no entry.
+- **Not automatic, and cannot be:** a new store's QuickBooks class (`RECON_STORE_BY_CLASS_`), ATM
+  machines (`ATM_MACHINE_MAP`) and deposit week start (Reconcile settings, default Wednesday) are
+  real per-store facts. Until set, its deposits land on the visible *not included* list.
+- **Removing** a store deactivated in Command Center is deliberately NOT done: dropping it would erase
+  its history from every past-period total.
+- `tests/store_list_test.js` (27 assertions) executes both halves; each half verified by mutation.
+  Browser-checked: six stores unchanged, and a seventh injected into the registry payload rendered as
+  its own pill and row with the pill reading `6/7`.
+
 ### The mismatch came back as a FREQUENCY, not an outage (fixed v2.570, 2026-09-04)
 
 Sky, 2026-09-03: *"things are much faster now, on polo it seems that River is the one that fails

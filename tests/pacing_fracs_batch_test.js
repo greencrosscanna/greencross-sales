@@ -84,6 +84,7 @@ function makeCtx(route, seededStore, now) {
     },
     jsonOut_: (o) => { ctx._out = o; return o; },
     gxCoreRoute_: (action, params) => { calls.push({ action, params }); return route(action, params); },
+    salesStores_: () => [{core:'bend',dutchie:'Bend',sales:'Bend'},{core:'center',dutchie:'Center',sales:'Center'},{core:'commercial',dutchie:'Commercial',sales:'Commercial'},{core:'hillsboro',dutchie:'Hillsboro',sales:'Hillsboro'},{core:'portland-rd',dutchie:'Portland Rd',sales:'Portland Rd'},{core:'river-rd',dutchie:'River Rd',sales:'River'}],   // the registry-driven list; its own test is store_list_test
   };
   vm.createContext(ctx);
   vm.runInContext(grabConst(GS, 'PACE_OPEN_HOUR'), ctx);

@@ -99,6 +99,7 @@ console.log('\n2. the single-date route returns stretched targets');
     'Portland Rd': { period_start: 'a', period_end: 'b', period_total: 27984, dow_targets: [1, 2798.42, 1, 1, 1, 1, 1], stretch: 0 },
   };
   const ctx = ctxWith(['pgStretchDaily_', 'pgStretchTargets_', 'getPeriodGoalsForDate_'], {
+    salesStores_: () => [{core:'bend',dutchie:'Bend',sales:'Bend'},{core:'center',dutchie:'Center',sales:'Center'},{core:'commercial',dutchie:'Commercial',sales:'Commercial'},{core:'hillsboro',dutchie:'Hillsboro',sales:'Hillsboro'},{core:'portland-rd',dutchie:'Portland Rd',sales:'Portland Rd'},{core:'river-rd',dutchie:'River Rd',sales:'River'}],
     GXCore: { getPeriodGoals: (dutchie) => rows[dutchie === 'River Rd' ? 'River' : dutchie] || null },
   });
   const out = ctx.getPeriodGoalsForDate_('2026-09-07');
@@ -124,7 +125,7 @@ console.log('\n3. the loader stretches at the READ — both paths, applied exact
   const byId = { bend: 'Bend' };
 
   const fast = ctxWith(['pgStretchDaily_', 'pgStretchTargets_', 'pgLoadPeriod_'], {
-    PG_STORE_MAP_: [{ dutchie: 'Bend', sales: 'Bend' }],
+    salesStores_: () => [{ core: 'bend', dutchie: 'Bend', sales: 'Bend' }],
     GXCore: { getPeriodGoals: () => ({ picked }) },
   });
   const a = fast.pgLoadPeriod_('2026-09-07', byId);
@@ -132,7 +133,7 @@ console.log('\n3. the loader stretches at the READ — both paths, applied exact
   ok('and keeps stretch alongside them, for visibility only', a.goals.Bend.stretch === 0.01);
 
   const slow = ctxWith(['pgStretchDaily_', 'pgStretchTargets_', 'pgLoadPeriod_'], {
-    PG_STORE_MAP_: [{ dutchie: 'Bend', sales: 'Bend' }],
+    salesStores_: () => [{ core: 'bend', dutchie: 'Bend', sales: 'Bend' }],
     GXCore: { getPeriodGoals: (store) => (store === '' ? { picked: null }
               : { period_start: 'a', period_end: 'b', period_total: 1,
                   dow_targets: [1, 4514, 1, 1, 1, 1, 1], stretch: 0.01 }) },

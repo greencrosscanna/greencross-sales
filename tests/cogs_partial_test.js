@@ -198,6 +198,7 @@ const gctx = {
       return [{ date: YDAY, cogs: 1000 }];
     },
   },
+  salesStores_: () => [{core:'bend',dutchie:'Bend',sales:'Bend'},{core:'center',dutchie:'Center',sales:'Center'},{core:'commercial',dutchie:'Commercial',sales:'Commercial'},{core:'hillsboro',dutchie:'Hillsboro',sales:'Hillsboro'},{core:'portland-rd',dutchie:'Portland Rd',sales:'Portland Rd'},{core:'river-rd',dutchie:'River Rd',sales:'River'}],   // the registry-driven list; its own test is store_list_test
   // A cache that can EXPIRE, so the TTL is a real assertion rather than decoration.
   CACHE: {
     get(k) {

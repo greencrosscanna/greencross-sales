@@ -221,8 +221,10 @@ check('one store-less call per period, not six per-store ones',
   /GXCore\.getPeriodGoals\(''\, date\)/.test(PROXY) || /GXCore\.getPeriodGoals\('', date\)/.test(PROXY), true);
 check('picked rows join on canonical store_id, not the tab\'s aliases',
   /byStoreId\[String\(r\.store_id/.test(PROXY), true);
+// Since 2026-09-14 the ids come off the registry rows themselves (salesStores_ reads GXCore.getStores),
+// which is the same guarantee with no per-store resolveStore round trip.
 check('the store_id map is resolved through the registry, not hardcoded',
-  /GXCore\.resolveStore\(s\.dutchie\)/.test(PROXY), true);
+  /function pgStoreIdMap_\(\) \{[\s\S]{0,120}salesStores_\(\)/.test(PROXY) && /gxStoreRegistry_\(\)/.test(PROXY), true);
 check('a row describing a different window is skipped, not folded in',
   /r\.period_start !== out\.window\.start/.test(PROXY), true);
 check('the per-store path survives as a fallback',

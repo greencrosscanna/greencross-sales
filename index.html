@@ -1410,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.594';
+const APP_VERSION = 'v2.595';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1453,14 +1453,21 @@ function updateRevVisibility() {
   if (subletRow) subletRow.style.display = sky ? '' : 'none';
 }
 
+// OFFLINE FALLBACK. (Keep `name` then `display` first on each row — the hub's cross-app contract test
+// reads this table by that shape.) GX Core's store registry is the list: applyStoreMeta updates these and ADDS any
+// store the registry has that this table does not, so a store created in Command Center appears here
+// without an edit. `id` is the registry's store_id — what a rename is matched on, so renaming a store
+// in Command Center updates its row instead of adding a second one. `name` is this app's internal key
+// and is never renamed (saved reconciliation, caches and deposit rules are written under it).
 const STORES = [
-  { name:'Bend',        display:'Century',    color:'#22D3EE' },
-  { name:'Center',      display:'Center',     color:'#3B82F6' },
-  { name:'Commercial',  display:'Commercial', color:'#A855F7' },
-  { name:'Hillsboro',   display:'Baseline',   color:'#6366F1' },
-  { name:'Portland Rd', display:'Portland',   color:'#D946EF' },
-  { name:'River',       display:'River',      color:'#EC4899' },
+  { name:'Bend',        display:'Century',    color:'#22D3EE', id:'bend' },
+  { name:'Center',      display:'Center',     color:'#3B82F6', id:'center' },
+  { name:'Commercial',  display:'Commercial', color:'#A855F7', id:'commercial' },
+  { name:'Hillsboro',   display:'Baseline',   color:'#6366F1', id:'hillsboro' },
+  { name:'Portland Rd', display:'Portland',   color:'#D946EF', id:'portland-rd' },
+  { name:'River',       display:'River',      color:'#EC4899', id:'river-rd' },
 ];
+const STORE_FALLBACK_COLOR = '#94A3B8';
 
 const GXCORE = 'https://script.google.com/macros/s/AKfycbx9mjeCBbDpxNYaqBv2hyZaO1hpbGG6PZM9AebFdwl0UwkdtRCGSWrH-8ohEtdF1K_6/exec';
 
@@ -1572,6 +1579,29 @@ const STORE_MAP = new Map(STORES.map(s => [s.name, s]));
 
 // GX Core dutchie_name → Sales internal key (only where they differ)
 const GX_DUTCHIE_TO_SALES = { 'River Rd': 'River' };
+
+// One registry row → this app's STORES. Matched on store_id first (a rename in Command Center updates
+// the row), then on the internal key (a cached payload from before store_id was sent). Anything else
+// is a store this table has never seen and is ADDED — until 2026-09-14 it was skipped, so a new store
+// loaded nowhere in Sales while every total quietly read one store short.
+function addOrUpdateStore_(gxStore) {
+  if (!gxStore) return null;
+  const id  = String(gxStore.store_id || '').trim().toLowerCase();
+  const dn  = String(gxStore.dutchie_name || '').trim();
+  const key = Object.prototype.hasOwnProperty.call(GX_DUTCHIE_TO_SALES, dn) ? GX_DUTCHIE_TO_SALES[dn] : dn;
+  let local = (id && STORES.find(s => s.id === id)) || (key && STORE_MAP.get(key)) || null;
+  if (!local) {
+    if (!key) return null;
+    local = { id, name: key, display: key, color: STORE_FALLBACK_COLOR };
+    STORES.push(local);
+    STORE_MAP.set(key, local);
+    if (typeof STORE_TO_VEL !== 'undefined') STORE_TO_VEL[key] = dn;
+  }
+  if (id && !local.id)      local.id      = id;
+  if (gxStore.color)        local.color   = gxStore.color;
+  if (gxStore.display_name) local.display = gxStore.display_name;
+  return local;
+}
 
 // Velocity store name → dashboard store name mapping (only exceptions needed)
 const VEL_STORE_MAP = { 'River Rd': 'River' };
@@ -3069,13 +3099,7 @@ async function fetchStoresMeta() {
 
   function applyStoreMeta(stores) {
     if (!stores || !stores.length) return;
-    stores.forEach(gxStore => {
-      const key   = GX_DUTCHIE_TO_SALES[gxStore.dutchie_name] || gxStore.dutchie_name;
-      const local = STORE_MAP.get(key);
-      if (!local) return;
-      if (gxStore.color)        local.color   = gxStore.color;
-      if (gxStore.display_name) local.display = gxStore.display_name;
-    });
+    stores.forEach(gxStore => addOrUpdateStore_(gxStore));
     buildStoreTabs();
   }
 

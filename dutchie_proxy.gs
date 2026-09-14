@@ -174,6 +174,61 @@ function gxStoreNames_() {
   return (_gxStoreNames_ = names);
 }
 
+/* THE SALES STORE LIST — GX Core's registry, with a local table as the OFFLINE FALLBACK ONLY.
+ *
+ * Goals, pacing, COGS and goal attainment each carried their own hardcoded copy of the six stores
+ * until 2026-09-14, so a store added in Command Center would load its sales and then be silently
+ * missing from every goal, pace line and Gross Profit figure — a smaller total, not an error. Every
+ * one of them reads this now.
+ *
+ * `sales` is this app's internal key: the registry's dutchie_name, except where Sales has always used
+ * a different word. That exception is NOT a store alias table (resolution still goes through Core) —
+ * it is the key this app's own saved state is written under (reconciliation, caches, deposit rules),
+ * and renaming it would orphan all of that. A new store gets its dutchie_name; nothing to add here.
+ *
+ * Matched by store_id, so a rename in Command Center keeps a known store's key instead of adding a
+ * second copy of it. The fallback is used only when the registry cannot answer, so a hiccup costs
+ * nothing it did not cost before this change. */
+const SALES_KEY_BY_DUTCHIE_ = { 'River Rd': 'River' };
+const SALES_STORES_FALLBACK_ = [
+  { core: 'bend',        dutchie: 'Bend',        sales: 'Bend'        },
+  { core: 'center',      dutchie: 'Center',      sales: 'Center'      },
+  { core: 'commercial',  dutchie: 'Commercial',  sales: 'Commercial'  },
+  { core: 'hillsboro',   dutchie: 'Hillsboro',   sales: 'Hillsboro'   },
+  { core: 'portland-rd', dutchie: 'Portland Rd', sales: 'Portland Rd' },
+  { core: 'river-rd',    dutchie: 'River Rd',    sales: 'River'       },
+];
+
+function salesStoreKey_(dutchieName) {
+  const d = String(dutchieName || '').trim();
+  return hasOwn_(SALES_KEY_BY_DUTCHIE_, d) ? SALES_KEY_BY_DUTCHIE_[d] : d;
+}
+
+function salesStores_() {
+  let rows = null;
+  try { rows = gxStoreRegistry_(); } catch (e) { rows = null; }
+  if (rows && rows.length) {
+    const seen = {};
+    const list = rows
+      .map(function (r, i) {
+        const core    = String((r && r.store_id) || '').trim().toLowerCase();
+        const dutchie = String((r && r.dutchie_name) || '').trim();
+        const known   = SALES_STORES_FALLBACK_.filter(function (f) { return f.core === core; })[0];
+        return { core: core, dutchie: dutchie, sales: known ? known.sales : salesStoreKey_(dutchie),
+                 sort: Number(r && r.sort_order) || 0, i: i };
+      })
+      .filter(function (st) {
+        if (!st.core || !st.dutchie || !st.sales || hasOwn_(seen, st.sales)) return false;
+        seen[st.sales] = true;
+        return true;
+      })
+      .sort(function (a, b) { return (a.sort - b.sort) || (a.i - b.i); })
+      .map(function (st) { return { core: st.core, dutchie: st.dutchie, sales: st.sales }; });
+    if (list.length) return list;
+  }
+  return SALES_STORES_FALLBACK_.map(function (st) { return { core: st.core, dutchie: st.dutchie, sales: st.sales }; });
+}
+
 /* Probe helper for the diagnostic routes below. They exist to ask Dutchie what a path returns, and
    they used to do it with a local key. GX Core answers now, so a path outside its allowlist comes
    back as a refusal naming the path — which is exactly the answer a probe wants, rather than a
@@ -1652,11 +1707,13 @@ function getISOWeek(date) {
 }
 
 function getStoresMeta_() {
-  const HIT = cacheGet_('stores_meta');
+  // `_v2` carries store_id, which the client matches renames on. The old key's entries lack it.
+  const HIT = cacheGet_('stores_meta_v2');
   if (HIT) return ContentService.createTextOutput(HIT).setMimeType(ContentService.MimeType.JSON);
   try {
     const rows = GXCore.getStores().map(function(s) {
       return {
+        store_id:     s.store_id,
         dutchie_name: s.dutchie_name,
         display_name: s.display_name,
         color:        s.color || '',
@@ -1664,7 +1721,7 @@ function getStoresMeta_() {
       };
     });
     const body = JSON.stringify({ stores: rows });
-    cacheSet_('stores_meta', body, 3600); // 1-hour TTL — store list rarely changes
+    cacheSet_('stores_meta_v2', body, 3600); // 1-hour TTL — store list rarely changes
     return ContentService.createTextOutput(body).setMimeType(ContentService.MimeType.JSON);
   } catch(e) {
     // GXCore hiccup — return empty list so frontend keeps its hardcoded fallback colors
@@ -1741,14 +1798,7 @@ function pgStretchTargets_(dowTargets, stretch) {
 // returns the frozen goal. Keyed by Sales canonical store name.
 function getPeriodGoalsForDate_(date) {
   if (!date) return jsonOut_({ ok: false, error: 'date required' });
-  const STORE_MAP = [
-    { dutchie: 'Bend',        sales: 'Bend'        },
-    { dutchie: 'Center',      sales: 'Center'      },
-    { dutchie: 'Commercial',  sales: 'Commercial'  },
-    { dutchie: 'Hillsboro',   sales: 'Hillsboro'   },
-    { dutchie: 'Portland Rd', sales: 'Portland Rd' },
-    { dutchie: 'River Rd',    sales: 'River'       },
-  ];
+  const STORE_MAP = salesStores_();
   try {
     const goals = {};
     for (const s of STORE_MAP) {
@@ -1773,16 +1823,6 @@ function getPeriodGoalsForDate_(date) {
   }
 }
 
-// Dutchie name → Sales canonical key. Shared by getPeriodGoalsForDate_ and the range route below so
-// the two cannot drift into disagreeing about what a store is called.
-const PG_STORE_MAP_ = [
-  { dutchie: 'Bend',        sales: 'Bend'        },
-  { dutchie: 'Center',      sales: 'Center'      },
-  { dutchie: 'Commercial',  sales: 'Commercial'  },
-  { dutchie: 'Hillsboro',   sales: 'Hillsboro'   },
-  { dutchie: 'Portland Rd', sales: 'Portland Rd' },
-  { dutchie: 'River Rd',    sales: 'River'       },
-];
 
 const PG_RANGE_MAX_DAYS_ = 400; // a full year plus slack — bounds the walk below
 
@@ -1796,16 +1836,8 @@ const PG_RANGE_MAX_DAYS_ = 400; // a full year plus slack — bounds the walk be
  * flows through, and an unknown name drops out instead of guessing.
  */
 function pgStoreIdMap_() {
-  const cached = cacheGet_('pg_storeids');
-  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
   const map = {};
-  for (const s of PG_STORE_MAP_) {
-    try {
-      const row = GXCore.resolveStore(s.dutchie);
-      if (row && row.store_id) map[String(row.store_id).toLowerCase()] = s.sales;
-    } catch (e) { /* unknown to the registry — it simply will not match, which is the safe direction */ }
-  }
-  if (Object.keys(map).length) cacheSet_('pg_storeids', JSON.stringify(map), 21600);
+  salesStores_().forEach(function (st) { if (st.core) map[st.core] = st.sales; });
   return map;
 }
 
@@ -1909,7 +1941,7 @@ function pgLoadPeriod_(date, byStoreId) {
   } catch (e) { /* fall through to the per-store path */ }
 
   out.window = null; out.goals = {};
-  for (const s of PG_STORE_MAP_) {
+  for (const s of salesStores_()) {
     try {
       const pg = GXCore.getPeriodGoals(s.dutchie, date);
       if (pg && pg.dow_targets) {
@@ -2118,7 +2150,7 @@ function attainProbe_(start, end) {
   });
 
   const netByStore = {}, readErrors = [];
-  for (const s of PG_STORE_MAP_) {
+  for (const s of salesStores_()) {
     netByStore[s.sales] = {};
     try {
       const rows = GXCore.getSalesDaily(s.dutchie, spanFrom, spanTo) || [];
@@ -2140,7 +2172,7 @@ function attainProbe_(start, end) {
     let pGoal = 0, pActual = 0;
     const pEnd = at(p.period_end);
 
-    for (const s of PG_STORE_MAP_) {
+    for (const s of salesStores_()) {
       const g    = (p.goals || {})[s.sales];
       const days = netByStore[s.sales] || {};
       const hasGoal = !!(g && g.dow_targets && g.dow_targets.length === 7);
@@ -2304,14 +2336,7 @@ function getPacingFracs_() {
    * canonical ids, which is what lets this app and Leaderboard read the same payload — Sales used to
    * ask with Dutchie names ('River Rd') and Leaderboard with store_ids, and before GX Core v293 the
    * map came back keyed by whatever the caller typed. `sales` stays the label this app renders. */
-  const STORE_MAP = [
-    { core: 'bend',        sales: 'Bend'        },
-    { core: 'center',      sales: 'Center'      },
-    { core: 'commercial',  sales: 'Commercial'  },
-    { core: 'hillsboro',   sales: 'Hillsboro'   },
-    { core: 'portland-rd', sales: 'Portland Rd' },
-    { core: 'river-rd',    sales: 'River'       },
-  ];
+  const STORE_MAP = salesStores_();
   /* NO ROUND TRIP FOR THE FRACTION — see paceShapesToday_ above. The curves come from Core once a
      day; the arithmetic is local and runs on every call for free. */
   const fracs = {};
@@ -3333,15 +3358,7 @@ const COGS_LOOP_DEADLINE_MS = 150000;
 // Returns daily COGS from GXCore (Dutchie-sourced, settled days only).
 // Response: { data: [{ date, store, cogs }], partial, stores_answered, stores_missing, missing_reason }
 function getCogsDutchie(params) {
-  // dutchie_name → Sales internal store name (only River differs)
-  const STORES = [
-    { dutchie: 'Bend',        sales: 'Bend'        },
-    { dutchie: 'Center',      sales: 'Center'      },
-    { dutchie: 'Commercial',  sales: 'Commercial'  },
-    { dutchie: 'Hillsboro',   sales: 'Hillsboro'   },
-    { dutchie: 'Portland Rd', sales: 'Portland Rd' },
-    { dutchie: 'River Rd',    sales: 'River'       },
-  ];
+  const STORES = salesStores_();
   const todayPT      = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
   const from         = (params.from || '').slice(0, 10);
   const rawTo        = (params.to   || '').slice(0, 10);

@@ -38,10 +38,12 @@ let pass = 0, fail = 0;
 const ok = (msg, cond) => { if (cond) { pass++; console.log('  ok   ' + msg); }
                             else      { fail++; console.log('  FAIL ' + msg); } };
 
-const MAP_SRC = /const PG_STORE_MAP_ = \[[\s\S]*?\];/.exec(GS);
+// The store list is salesStores_ now (GX Core registry, local fallback). The REAL function runs here,
+// with the registry unreachable, so this exercises the fallback's six stores and their Sales keys.
+const MAP_SRC = /const SALES_KEY_BY_DUTCHIE_ = [\s\S]*?\n\];/.exec(GS);
 const CAP_SRC = /const PG_RANGE_MAX_DAYS_ = \d+;/.exec(GS);
 if (!MAP_SRC || !CAP_SRC) {
-  console.log('PG_STORE_MAP_ / PG_RANGE_MAX_DAYS_ are gone from dutchie_proxy.gs');
+  console.log('SALES_KEY_BY_DUTCHIE_/SALES_STORES_FALLBACK_ or PG_RANGE_MAX_DAYS_ are gone from dutchie_proxy.gs');
   console.log('\n0 passed, 1 failed'); process.exit(1);
 }
 
@@ -89,7 +91,8 @@ function salesRows(dutchie, from, to) {
 let capturedRanges = [];
 const ctx = {
   console,
-  PG_STORE_MAP_: null, PG_RANGE_MAX_DAYS_: null,
+  PG_RANGE_MAX_DAYS_: null,
+  gxStoreRegistry_: () => { throw new Error('registry unreachable in this test'); },
   GXCore: { getSalesDaily: (store, from, to) => { capturedRanges.push([store, from, to]); return salesRows(store, from, to); } },
   Utilities: { formatDate: () => TODAY },
   dayBefore_: ds => iso(at(ds) - dayMs),
@@ -100,7 +103,8 @@ const ctx = {
   }),
 };
 vm.createContext(ctx);
-vm.runInContext(MAP_SRC[0] + '\n' + CAP_SRC[0] + '\n' + grab(GS, 'attainProbe_'), ctx);
+vm.runInContext(MAP_SRC[0] + '\n' + CAP_SRC[0] + '\n' + grab(GS, 'hasOwn_') + '\n' + grab(GS, 'salesStoreKey_') + '\n' +
+                 grab(GS, 'salesStores_') + '\n' + grab(GS, 'attainProbe_'), ctx);
 
 // ── Input validation ──────────────────────────────────────────────────────────────────────────
 const bad = vm.runInContext('attainProbe_("2026-8-1", "2026-08-31")', ctx);

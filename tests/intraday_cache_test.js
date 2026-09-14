@@ -48,7 +48,13 @@ const CACHE = {
   },
   put(k, v, ttl) { store.set(k, { v, until: clock + ttl }); },
   putAll(entries, ttl) { Object.keys(entries).forEach(k => CACHE.put(k, entries[k], ttl)); },
+  remove(k) { store.delete(k); },
 };
+
+// Wall time for the in-flight wait, separate from the TTL clock. Utilities.sleep advances it and runs
+// whatever the "other execution" was scheduled to do at that moment.
+let wallMs = 0, sleeps = 0, onSleep = null;
+const FakeDate = class extends Date { static now() { return 1789000000000 + wallMs; } };
 
 let liveCalls = [];
 const ctx = {
@@ -56,13 +62,19 @@ const ctx = {
   // The real live fetch is replaced; what is under test is the caching wrapper around it, and the
   // wrapper is the part that was missing. Returns a distinguishable payload per call so a served
   // copy is tellable from a fresh one.
+  Date: FakeDate,
+  Utilities: { sleep(ms) { wallMs += ms; sleeps++; if (onSleep) onSleep(wallMs); } },
+  probeMark_() {},
   dutchieTodayFetchLive_(store_, todayPT, toISO) {
+    if (ctx.__liveThrows) throw new Error('dutchie_get unreachable');
     liveCalls.push({ store: store_, todayPT, toISO });
     return { netSales: 100 * liveCalls.length, orders: liveCalls.length, at: toISO };
   },
 };
 vm.createContext(ctx);
-vm.runInContext([grab('cacheGet_'), grab('cacheSet_'), grab('dutchieTodayFetch_')].join('\n'), ctx);
+const constLine = n => { const m = new RegExp('\\nconst ' + n + '\\s*=\\s*[^;]+;').exec(SRC); if (!m) throw new Error('no const ' + n); return m[0]; };
+vm.runInContext([constLine('DTODAY_WAIT_MS_'), constLine('DTODAY_FLIGHT_TTL_'),
+  grab('cacheGet_'), grab('cacheSet_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_')].join('\n'), ctx);
 
 const call = (s, day, toISO, nocache) =>
   vm.runInContext('dutchieTodayFetch_(' + JSON.stringify([s, day, toISO, nocache]).slice(1, -1) + ')', ctx);
@@ -73,7 +85,7 @@ function check(desc, got, want) {
   ok ? pass++ : fail++;
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${desc}` + (ok ? '' : `  — got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`));
 }
-function reset() { store.clear(); liveCalls = []; clock = 0; }
+function reset() { store.clear(); liveCalls = []; clock = 0; wallMs = 0; sleeps = 0; onSleep = null; ctx.__liveThrows = false; }
 
 console.log('\nmany tabs, one pull — the whole point');
 reset();
@@ -125,6 +137,57 @@ try { got = call('River Rd', '2026-09-03', '2026-09-03T18:00:04Z'); } catch (e) 
 check('unparseable JSON does not throw out of the fetch', survived, true);
 check('it falls through to a live pull', liveCalls.length, 2);
 check('and returns real numbers', got && got.netSales, 200);
+
+/* ── A SECOND ASKER JOINS THE PULL ALREADY RUNNING ─────────────────────────────────────────────────
+ * Sky, 2026-09-13: "it took 60+ seconds to load on mobile." The browser abandons a live half at 15s;
+ * Apps Script does not, so the retry used to start a second identical 20s pull and lose it too. */
+const FLIGHT = 'dtoday_v1_River Rd_2026-09-03__inflight';
+const ENTRY  = 'dtoday_v1_River Rd_2026-09-03';
+
+console.log('\na request arriving mid-pull is served that pull\'s answer');
+reset();
+store.set(FLIGHT, { v: '1', until: 1e9 });                         // another execution is pulling
+onSleep = t => { if (t >= 6000 && !store.has(ENTRY)) {             // …and lands 6s later
+  store.set(ENTRY, { v: JSON.stringify({ netSales: 777 }), until: 1e9 }); store.delete(FLIGHT); } };
+got = call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z');
+check('no second pull', liveCalls.length, 0);
+check('it returns the in-flight pull\'s figure', got && got.netSales, 777);
+check('and it waited for it rather than giving up at once', wallMs >= 6000, true);
+
+console.log('\nthe other pull FAILED: the waiter pulls at once, not after the whole wait');
+reset();
+store.set(FLIGHT, { v: '1', until: 1e9 });
+onSleep = t => { if (t >= 2000) store.delete(FLIGHT); };            // gone, and no answer left behind
+got = call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z');
+check('it did its own pull', liveCalls.length, 1);
+check('within moments of the marker clearing, not the full wait', wallMs < 3000, true);
+
+console.log('\na stuck marker blocks nobody past the wait');
+reset();
+store.set(FLIGHT, { v: '1', until: 1e9 });
+got = call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z');
+check('it pulled for itself', liveCalls.length, 1);
+check('after the wait ran out', wallMs >= 25000 && wallMs < 26000, true);
+check('the wait is shorter than one browser attempt at the live ceiling (28s)',
+  Number(/const DTODAY_WAIT_MS_\s*=\s*(\d+)/.exec(SRC)[1]) < 28000, true);
+
+console.log('\nnocache ignores the marker — "go and look again" is not "wait for an older look"');
+reset();
+store.set(FLIGHT, { v: '1', until: 1e9 });
+call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z', '1');
+check('pulls immediately', liveCalls.length === 1 && sleeps === 0, true);
+
+console.log('\nthe marker is set during a pull and cleared after it — even when the pull throws');
+reset();
+let sawMarker = false;
+ctx.dutchieTodayFetchLive_ = (function (orig) { return function () { sawMarker = store.has(FLIGHT); return orig.apply(this, arguments); }; })(ctx.dutchieTodayFetchLive_);
+call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z');
+check('marked while pulling', sawMarker, true);
+check('cleared afterwards', store.has(FLIGHT), false);
+ctx.__liveThrows = true; clock += 100;
+let threw = false; try { call('River Rd', '2026-09-03', '2026-09-03T18:02:00Z'); } catch (e) { threw = true; }
+check('a failed pull still throws to its caller', threw, true);
+check('and still clears the marker, so nobody waits on a dead pull', store.has(FLIGHT), false);
 
 console.log('\nthe wrapper is wired into the sales path, not merely defined');
 check('getStoreSales_ passes its nocache through to the live fetch',

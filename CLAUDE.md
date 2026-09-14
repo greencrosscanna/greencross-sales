@@ -503,6 +503,30 @@ miss). Mobile and desktop rows share it.
 - Measured on the live backend: a poll set all six blinking at 0s and cleared each as it landed
   (five by 2.9s, Hillsboro at 17.8s). `tests/store_dot_blink_test.js`, verified by mutation.
 
+## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
+
+Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:
+settled halves 19-101ms, live halves **11.7-23.6s in one `dutchie_get` hop** (Portland Rd 50s),
+against 2.7-4.2s on 09-04, with GX Core itself idle (~120 calls that hour). The hop is not ours to
+shorten. What was ours: the browser gave a live half **15s**, Apps Script ran the abandoned request
+to completion anyway, and the retry started a **second** identical pull that was abandoned too —
+store falls to the next 60s poll.
+
+- **Live half: `gasFetchJson(url, 2, 28000)`**; settled keeps 15s. 2 x 28s stays inside the 60s
+  poll, which `background_refresh_test` pins, because the in-flight guard blocks the recovering poll.
+- **The proxy joins a pull already running** (`dtodayAwaitFlight_`, up to 25s, advisory marker with
+  a 60s TTL). A marker that vanishes without an answer means that pull failed — pull at once.
+  `nocache` skips the wait. `tests/intraday_cache_test.js`.
+- **The month paints when its settled half lands** (`onSettled`), today-pending, so the dot blinks
+  and a today view shimmers the row. **Only for a store with nothing on screen** — on a re-poll it
+  would drop today out of every total for the length of the hop. Never for an old backend that
+  ignored `phase`. `tests/phase_split_test.js` 3c.
+- **Not done, deliberately:** painting last visit's today figure while the hop runs. It is a
+  different number replacing itself, which is the one thing the phone's first load must not do.
+
+Browser, cold, live backend (proxy change not yet deployed): fast stores' today at ~7s; three hit
+28s and their retries answered in ~6s; last store 36s — where v2.591 would have fallen to the poll.
+
 ## Two load-bearing render rules, both learned the hard way
 
 - **A render fault must never kill a data load.** `loadAllStores()` had `try/finally` with no

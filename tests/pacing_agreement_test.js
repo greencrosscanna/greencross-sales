@@ -84,6 +84,7 @@ function makeCtx(clockIso) {
     paceFracs: null, paceFracsAt: 0,
     _bdOrder: null,
     toDateStr: d => d.toLocaleDateString('en-CA'),
+    laDay: () => '2026-09-13', _todayPending: new Set(),
     activeWeekBounds: () => ['2026-09-01', '2026-09-07'],
     // WITH a date this is the frozen period target; WITHOUT one it is the budget fallback. The two
     // differ, which is precisely what the old hero/rows split let leak into the answer.

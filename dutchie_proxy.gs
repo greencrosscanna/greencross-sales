@@ -1442,17 +1442,75 @@ function loadProbe_(params) {
  * `nocache` bypasses, and that escape hatch is what makes the cache safe to add: Settings →
  * "clear cache" means "this data is wrong, go and look again", which a served copy cannot honor.
  */
+/* ONE PULL AT A TIME PER STORE-DAY — A SECOND ASKER WAITS FOR THE FIRST INSTEAD OF STARTING ITS OWN.
+ *
+ * Sky, 2026-09-13, on v2.591: "it took 60+ seconds to load on mobile." Measured on the live
+ * deployment within minutes of it: every store's settled half answered in 19-101ms, and every live
+ * half spent 11.7-23.6s in ONE dutchie_get round trip to GX Core (Portland Rd 50.5s across three),
+ * against 2.7-4.2s on 2026-09-04. GX Core itself was idle — ~120 calls that hour, dutchie_get
+ * averaging 1.2s of its own execution — so the time is the /exec hop, which this app cannot shorten.
+ *
+ * What this app DID control was making it worse. The browser allows a live half 15s, then retries.
+ * Against a 20s hop the first request is abandoned by the browser but NOT by Apps Script, which runs
+ * it to completion; the retry arrives while it is still going, finds no cache entry yet, and starts a
+ * SECOND identical pull — which the browser abandons too. Both succeed on the server, both too late,
+ * the store is marked today-pending, and the reader waits for the next 60-second poll to be served
+ * the copy the first attempt cached. That is the 60+ seconds.
+ *
+ * So a pull marks itself in flight, and a request arriving during it polls the cache for that pull's
+ * answer (DTODAY_WAIT_MS_) instead of repeating it. The marker is advisory, not a lock:
+ *   - it has a TTL, so a pull that dies without clearing it cannot block anybody past that;
+ *   - a marker that disappears WITHOUT a cache entry means the other pull failed, and the waiter does
+ *     its own pull at once rather than waiting out the clock for an answer that is not coming;
+ *   - a race where two requests both miss the marker costs a duplicate pull, which is exactly today's
+ *     behavior, never a wrong figure.
+ * `nocache` still skips the cache AND the wait: "clear cache" means go and look again, and a pull
+ * that started before the button was pressed is not that. */
+const DTODAY_WAIT_MS_   = 25000;
+const DTODAY_FLIGHT_TTL_ = 60;
+
 function dutchieTodayFetch_(store, todayPT, toISO, nocache) {
   const liveCacheKey = 'dtoday_v1_' + store + '_' + todayPT;
+  const flightKey    = liveCacheKey + '__inflight';
   if (!nocache) {
     const hit = cacheGet_(liveCacheKey);
     // Parse failures fall through to a live pull rather than throwing: a corrupt or half-written
     // cache entry must cost a fetch, never the store's whole row.
     if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+    const waited = dtodayAwaitFlight_(liveCacheKey, flightKey);
+    if (waited) return waited;
   }
-  const out = dutchieTodayFetchLive_(store, todayPT, toISO);
-  try { cacheSet_(liveCacheKey, JSON.stringify(out), 90); } catch (e) {}
-  return out;
+  try { CACHE.put(flightKey, String(Date.now()), DTODAY_FLIGHT_TTL_); } catch (e) {}
+  try {
+    const out = dutchieTodayFetchLive_(store, todayPT, toISO);
+    try { cacheSet_(liveCacheKey, JSON.stringify(out), 90); } catch (e) {}
+    return out;
+  } finally {
+    try { CACHE.remove(flightKey); } catch (e) {}
+  }
+}
+
+/* Returns the in-flight pull's answer, or null to go and pull. Every failure here is a null — the
+   wait is an optimization, and it must never be the reason a store gets no figure. */
+function dtodayAwaitFlight_(liveCacheKey, flightKey) {
+  try {
+    if (!CACHE.get(flightKey)) return null;
+    const started = Date.now();
+    while (Date.now() - started < DTODAY_WAIT_MS_) {
+      Utilities.sleep(400);
+      const hit = cacheGet_(liveCacheKey);
+      if (hit) {
+        try {
+          const out = JSON.parse(hit);
+          probeMark_('live_joined_inflight', Date.now() - started, { served: true });
+          return out;
+        } catch (e) { return null; }
+      }
+      if (!CACHE.get(flightKey)) break;   // the other pull ended without an answer — do our own now
+    }
+    probeMark_('live_joined_inflight', Date.now() - started, { served: false });
+  } catch (e) {}
+  return null;
 }
 
 function dutchieTodayFetchLive_(store, todayPT, toISO) {

@@ -274,6 +274,58 @@ function harness(live) {
        /reachesToday/.test(fmd) && /fetchPhase\(store, from, to, ''\)/.test(fmd));
   }
 
+  console.log('\n3c. the month paints the moment its settled half lands, not when today does');
+  {
+    /* Sky, 2026-09-13: "it took 60+ seconds to load on mobile." The settled half answered in under a
+     * second; the row waited on a 12-24s live hop. */
+    const gate = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
+    const run = async ({ liveFirst = false, oldBackend = false } = {}) => {
+      const h = harness('ok');
+      const sGate = gate(), lGate = gate();
+      const settled = { store: 'Bend', netSales: 10000, orders: 100, cost: 6000, weekly: [],
+                        daily: [{ date: '2026-09-10', netSales: 10000 }], phase: oldBackend ? 'both' : 'settled' };
+      const live = { store: 'Bend', netSales: 1000, orders: 20, cost: 400, weekly: [],
+                     daily: [{ date: '2026-09-11', netSales: 1000 }], phase: 'live' };
+      h.ctx.fetchPhase = async (store, from, to, phase) => { await (phase === 'live' ? lGate.p : sGate.p); return JSON.parse(JSON.stringify(phase === 'live' ? live : settled)); };
+      const painted = [];
+      const flush = () => new Promise(r => setImmediate(r));
+      const done = h.ctx.fetchMonthData({ name: 'Bend' }, 2026, 9, false,
+        m => painted.push({ net: m.netSales, pending: h.ctx._todayPending.has('Bend') }));
+      if (liveFirst) { lGate.open(); await flush(); sGate.open(); }
+      else { sGate.open(); await flush(); await flush(); }
+      const early = painted.slice();
+      lGate.open();
+      const d = await done;
+      return { h, early, painted, d };
+    };
+
+    const a = await run();
+    eq('the settled month is handed over before today arrives', a.early.map(x => x.net), [10000]);
+    ok('...marked today-pending while it waits, so the dot blinks and a today view shimmers', a.early[0] && a.early[0].pending === true);
+    eq('...and the function still returns the merged month once today lands', a.d.netSales, 11000);
+    eq('...with nothing left pending', a.h.ctx._todayPending.size, 0);
+
+    const b = await run({ liveFirst: true });
+    eq('today already in when the month lands → no interim paint', b.painted.length, 0);
+    eq('...and the merged month comes back', b.d.netSales, 11000);
+
+    const c = await run({ oldBackend: true });
+    eq('an old backend that ignored `phase` is never painted as settled-only (it is the whole month)', c.painted.length, 0);
+    eq('...and is not doubled', c.d.netSales, 10000);
+  }
+  {
+    const las = HTML.slice(HTML.indexOf('async function loadAllStores'));
+    ok('a re-poll never swaps a complete row for a settled-only one',
+       /const onSettled = liveData\[store\.name\] \? null :/.test(las));
+    ok('...and an interim paint for a period the reader has left is dropped',
+       /if \(_liveDataKey !== loadKey \|\| liveData\[store\.name\]\) return;/.test(las));
+    ok('the retry keeps the early paint', /return fetchMonthData\(store, year, month, true, onSettled\);/.test(las));
+    ok('the live half waits 28s per attempt, and 2 x 28s still fits the 60s poll',
+       /phase === 'live' \? await gasFetchJson\(url, 2, 28000\)/.test(las));
+    ok('a today view shimmers a today-pending row instead of showing $0',
+       /pending: !liveData\[s\] \|\| \(!!activeDay && activeDay === laDay\(\) && _todayPending\.has\(s\)\)/.test(HTML));
+  }
+
   console.log('\n4. the status pill stops saying 6/6 over an understated total');
   {
     const las = HTML.slice(HTML.indexOf('async function loadAllStores'));

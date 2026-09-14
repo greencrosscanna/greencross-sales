@@ -1410,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.591';
+const APP_VERSION = 'v2.592';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -3252,7 +3252,19 @@ async function loadAllStores() {
     // RETRY. A long in-request chain holds _loadAllStoresInFlight, which blocks the poll that
     // would have fixed it — so failing fast and letting the next poll try again recovers sooner
     // than retrying harder here. Worst case ~31s, comfortably inside one poll interval.
-    const data = await gasFetchJson(url, 2, 15000);
+    /* THE LIVE HALF GETS 28s, NOT 15s. Sky, 2026-09-13, on v2.591: "it took 60+ seconds to load on
+     * mobile." Measured minutes later: the settled half answered in under a second for every store,
+     * and the live half's single GX Core hop took 11.7-23.6s (Portland Rd 50s) — against a 15s
+     * ceiling. So the browser abandoned requests that were about to succeed, the retry started a
+     * second pull on the server, and the store fell through to the next 60s poll. 28s covers the
+     * measured single-hop band; the proxy now makes a retry JOIN a pull already running
+     * (dtodayAwaitFlight_, up to 25s) instead of repeating it, so attempt two lands inside its own
+     * ceiling even when one hop outruns the first. The settled half keeps 15s — it is a library
+     * read, and a slow one is genuinely broken.
+     * 28 and not more: 2 x 28s = 56s stays inside the 60s poll, because _loadAllStoresInFlight
+     * blocks the very poll that would recover a store (background_refresh_test pins it). The
+     * longer hold is also why the month is painted the moment the settled half lands (onSettled). */
+    const data = phase === 'live' ? await gasFetchJson(url, 2, 28000) : await gasFetchJson(url, 2, 15000);
     if (data.error) {
       if (data.error === 'Auth required') { salesLogout(); throw new Error(data.error); }
       throw new Error(data.error);
@@ -3280,7 +3292,7 @@ async function loadAllStores() {
    * A range that does not reach today has no live half at all, so it stays a single request and an
    * unchanged contract — which is also what every past month, the YTD walk and the compare-period
    * fetch keep using. */
-  async function fetchMonthData(store, year, month, _retry) {
+  async function fetchMonthData(store, year, month, _retry, onSettled) {
     const cached = readSalesCache(store.name, year, month);
     // Only complete months are ever written, so a cache hit is never today-pending.
     if (cached) { stateMap[store.name] = 'ok'; _todayPending.delete(store.name); return cached; }
@@ -3299,17 +3311,29 @@ async function loadAllStores() {
         // stacked on top of a timeout, so the worst case is bounded rather than multiplied.
         if (!_retry && e.message !== 'Auth required' && !/timed out after/.test(e.message)) {
           await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
-          return fetchMonthData(store, year, month, true);
+          return fetchMonthData(store, year, month, true, onSettled);
         }
         console.warn('[load] ' + store.name + ' failed:', e.message);
         throw e;
       }
     }
 
-    const [sRes, lRes] = await Promise.allSettled([
-      fetchPhase(store, from, to, 'settled'),
-      fetchPhase(store, from, to, 'live'),
-    ]);
+    const settledP = fetchPhase(store, from, to, 'settled');
+    const liveP    = fetchPhase(store, from, to, 'live');
+    /* PAINT THE MONTH THE MOMENT IT EXISTS. The settled half lands in ~2-4s; the live half can take
+     * 20+ on a bad evening, and the row used to wait for both. Handed to the caller as a month
+     * without today, with the store marked today-pending — so the dot blinks and a today-only view
+     * shimmers the row instead of showing $0 — and replaced by the merged month below when today
+     * lands. Skipped when the live half is already in (nothing to bridge), and for an old backend
+     * that ignored `phase` (its answer is the WHOLE month; the path below handles that). */
+    let liveIn = false;
+    liveP.then(() => { liveIn = true; }, () => { liveIn = true; });
+    if (onSettled) settledP.then(v => {
+      if (liveIn || !v || v.phase !== 'settled') return;
+      _todayPending.add(store.name);
+      try { onSettled(mergeStorePhases_(v, null)); } catch (e) { console.error('[load] early paint failed:', e); }
+    }, () => {});
+    const [sRes, lRes] = await Promise.allSettled([settledP, liveP]);
 
     /* THE SETTLED HALF IS THE STORE. If it failed there is no month to show, and the store errors
      * exactly as it did before this split existed — showing today's few hundred dollars on its own,
@@ -3318,7 +3342,7 @@ async function loadAllStores() {
       const e = sRes.reason || new Error('settled fetch failed');
       if (!_retry && e.message !== 'Auth required' && !/timed out after/.test(e.message)) {
         await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
-        return fetchMonthData(store, year, month, true);
+        return fetchMonthData(store, year, month, true, onSettled);
       }
       // 'err' is the stronger statement; a store that failed outright is not "today pending" too.
       _todayPending.delete(store.name);
@@ -3396,7 +3420,17 @@ async function loadAllStores() {
   } else {
     const promises = STORES.map(async store => {
       try {
-        const data = await fetchMonthData(store, activeYear, activeMonth);
+        /* Early paint ONLY for a store with nothing on screen. On a re-poll liveData already holds
+         * the complete month including today's figure from a minute ago; swapping in a settled-only
+         * month would drop today out of every total for the length of the live hop, every poll. */
+        const onSettled = liveData[store.name] ? null : month => {
+          if (_liveDataKey !== loadKey || liveData[store.name]) return;   // period moved, or it landed
+          liveData[store.name] = month;
+          rebuildLiveDateMap(store.name);
+          mergeDailyData(store.name, month.daily);
+          try { render(); } catch (e) { console.error('[render] early paint failed:', e); }
+        };
+        const data = await fetchMonthData(store, activeYear, activeMonth, false, onSettled);
         liveData[store.name] = data;
         rebuildLiveDateMap(store.name);
         mergeDailyData(store.name, data.daily);
@@ -5163,7 +5197,10 @@ function _storeBreakdownRows(stores, storeNets, isClosed, elapsedPct, yr, daysIn
     // sCompareGoal rides along unused by the markup: it is what tests/pacing_agreement_test.js sums
     // to prove the six rows still add up to the headline's expected-to-date.
     return { s, st, col, snet, sPeriodGoal, sCompareGoal, sGoalPct, sFillCls, sFillStyle, sBarW,
-             sPacePos, diff, pending: !liveData[s] };
+             sPacePos, diff,
+             // A today-only view of a store whose today has not landed has no figure to show — its $0
+             // is "not asked yet", which this app shimmers rather than render as a measurement.
+             pending: !liveData[s] || (!!activeDay && activeDay === laDay() && _todayPending.has(s)) };
   });
 }
 

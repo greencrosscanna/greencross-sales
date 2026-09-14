@@ -1241,6 +1241,7 @@ function doGet(e) {
   if (params.action === 'clear_budget')    { const g = writeGuard_(auth.user, 'clear_budget'); if (!g.ok) return jsonOut_(g); return clearBudget_(params); }
   if (params.action === 'set_bills_once')  { const g = writeGuard_(auth.user, 'set_bills_once'); if (!g.ok) return jsonOut_(g); return setBillsOnce_(params); }
   if (params.action === 'clear_atm_cache') { const g = writeGuard_(auth.user, 'clear_atm_cache'); if (!g.ok) return jsonOut_(g); return clearAtmCache_(params, auth.user); }
+  if (params.action === 'velocity')      return jsonOut_(getVelocity_(params));
   if (params.action === 'inventory')     return getInventory(params);
   if (params.action === 'invprobe')      return probeInventoryEndpoints(params);
   if (params.action === 'invfields')     return getInvFields(params);
@@ -3354,6 +3355,49 @@ function testProxy() {
  * WHAT HAPPENS WHEN IT FIRES is the point: the stores already gathered are RETURNED, the ones not
  * asked are NAMED, and the answer is NOT cached. See the cache decision at the bottom of the loop. */
 const COGS_LOOP_DEADLINE_MS = 150000;
+
+/* SALES SPEED PER PRODUCT — for the Inventory tab's "Critical" count (under 3 days on hand).
+ *
+ * Through GX Core, never another app's /exec. Until 2026-09-14 the browser fetched this straight from a
+ * hardcoded Inventory deployment that nothing else in the suite referenced, and that deployment was
+ * serving `{"stores":{},"lastSynced":"2026-08-11…"}` — so the tile read a confident green 0 on data
+ * that did not exist. GX Core's velocity_summary (rebuilt every 6h) is what Inventory itself reads.
+ *
+ * Keyed by dutchie_name, which is what STORE_TO_VEL maps to on the client. Only products that are
+ * SELLING are sent: the one reader ignores a zero velocity, and all ~12k rows would be ~1MB per load.
+ * An empty answer is an ERROR here, never a result — an empty map is exactly the silent 0 above. */
+const VELOCITY_CACHE_KEY_ = 'velocity_v1';
+function getVelocity_(params) {
+  if (!params.nocache) {
+    const hit = cacheGet_(VELOCITY_CACHE_KEY_);
+    if (hit) { try { return JSON.parse(hit); } catch (e) { /* corrupt entry costs a read, not the tile */ } }
+  }
+  let rows;
+  try {
+    rows = GXCore.getVelocity('') || [];
+  } catch (e) {
+    return { ok: false, error: 'GX Core velocity unavailable: ' + ((e && e.message) || e) };
+  }
+  const nameById = {};
+  salesStores_().forEach(function (st) { nameById[st.core] = st.dutchie; });
+  const stores = {};
+  let kept = 0;
+  rows.forEach(function (r) {
+    const store = nameById[String((r && r.store) || '').trim().toLowerCase()];
+    const name  = String((r && r.product_name) || '').trim();
+    if (!store || !name || name === 'Unknown') return;
+    const v7 = Number(r.vel7) || 0, v14 = Number(r.vel14) || 0, v30 = Number(r.vel30) || 0;
+    if (!(v7 > 0 || v14 > 0 || v30 > 0)) return;
+    if (!hasOwn_(stores, store)) stores[store] = {};
+    stores[store][name] = { vel7: v7, vel14: v14, vel30: v30, sku: String(r.sku || '') };
+    kept++;
+  });
+  if (!kept) return { ok: false, error: 'GX Core returned no selling products (' + rows.length + ' velocity rows)' };
+  const out = { ok: true, source: 'gxcore', stores: stores, rows: rows.length, kept: kept,
+                built_at: Utilities.formatDate(new Date(), 'America/Los_Angeles', "yyyy-MM-dd'T'HH:mm:ss") };
+  cacheSet_(VELOCITY_CACHE_KEY_, JSON.stringify(out), 3600);
+  return out;
+}
 
 // Returns daily COGS from GXCore (Dutchie-sourced, settled days only).
 // Response: { data: [{ date, store, cogs }], partial, stores_answered, stores_missing, missing_reason }

@@ -554,6 +554,28 @@ store falls to the next 60s poll.
 Browser, cold, live backend (proxy change not yet deployed): fast stores' today at ~7s; three hit
 28s and their retries answered in ~6s; last store 36s — where v2.591 would have fallen to the poll.
 
+## The Inventory tab's sales speed comes through GX Core — and was a green 0 until v2.596
+
+The Critical tile (products under 3 days on hand) fetched velocity straight from a hardcoded
+Inventory `/exec` that no other repo referenced — app-to-app, against the suite rule. **Measured
+2026-09-14, that deployment answered `{"stores":{},"lastSynced":"2026-08-11…"}`**, and `loadVelocity`
+accepted any object with a `stores` key. So the tile counted nothing and showed **0 in green** — "all
+clear" — on data that did not exist, for at least a month. Found by a read-only audit filed for
+routing; the blank data was found only by calling the address.
+
+- **`?action=velocity`** (auth-gated) → `getVelocity_` → `GXCore.getVelocity('')`, the 6-hourly
+  `velocity_summary` Inventory itself reads. Keyed by dutchie_name (what `STORE_TO_VEL` maps to);
+  only SELLING products are sent (the tile ignores zero velocity; all ~12k rows is ~1MB). Cached 1h.
+- **Empty is an ERROR on both sides, never a result.** The backend refuses to answer `ok` with no
+  selling products and does not cache it; the client refuses an empty map (live or cached) and the
+  tile reads `—` / *sales speed unavailable*. An empty map is precisely the silent 0.
+- **Tried, not loading:** `renderInventory` re-asks at most every 5 minutes after a failure — the
+  render a load triggers must not re-trigger it (same rule as `ensureExpBudgets`).
+- **One app-to-app address remains, deliberately:** `fetchLeaderboardGoalsDirect`, the documented
+  fallback when GX Core's `published_goals` cannot answer, URL from Core config `lbGoals`.
+  `tests/velocity_via_core_test.js` (29 assertions, mutation-verified on both halves) fails on any
+  THIRD Apps Script address in `index.html`.
+
 ## Two load-bearing render rules, both learned the hard way
 
 - **A render fault must never kill a data load.** `loadAllStores()` had `try/finally` with no

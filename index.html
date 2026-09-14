@@ -1410,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.595';
+const APP_VERSION = 'v2.596';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1572,6 +1572,8 @@ let hiddenExpCats = new Set(JSON.parse(localStorage.getItem('hiddenExpCats') || 
 let hiddenOtherRevs = new Set(JSON.parse(localStorage.getItem('hiddenOtherRevs') || '[]'));
 let inventoryData = {}; // { storeName: { products: [...] } | { error, products: [] } }
 let invLoading = new Set();
+let velocityError = null;      // why the last velocity load came back with nothing (null = none failed)
+let _velocityTriedAt = 0;      // TRIED, not loading: a failed load must not re-fire on every render
 let velocityData = null; // { stores: { velStoreName: { productName: { vel7, vel14, vel30, vel90 } } } }
 
 // Fast O(1) lookup by store name — replaces repeated inline STORES.find() calls.
@@ -1610,7 +1612,6 @@ const STORE_TO_VEL = Object.fromEntries(
   STORES.map(s => [s.name, Object.entries(VEL_STORE_MAP).find(([v,d]) => d === s.name)?.[0] || s.name])
 );
 // URL for the inventory tracker's velocity endpoint (publicly accessible, CORS-enabled)
-const VEL_PROXY_URL = 'https://script.google.com/macros/s/AKfycbzkZej8lH0RnXXdfekb3XDnRy2xdiO88L2QhPomDIO-tjZ8-clAG51wjceID-tIg6n6Cw/exec';
 
 function toggleOtherRev(type) {
   hiddenOtherRevs.has(type) ? hiddenOtherRevs.delete(type) : hiddenOtherRevs.add(type);
@@ -8783,13 +8784,20 @@ function renderBudgetPlannerMobile() {
 // ── Inventory ─────────────────────────────────────────────────────────────────
 
 async function loadVelocity() {
+  // Through this app's own backend, which reads GX Core. It used to call a hardcoded Inventory /exec
+  // that answered an EMPTY store map, which set velocityData and let the Critical tile read a green 0.
+  // Only a non-empty answer counts as loaded; anything else marks the tile unavailable, never 0.
   const cached = readCache('velocity');
-  if (cached) { velocityData = cached; return; }
+  if (cached && cached.stores && Object.keys(cached.stores).length) { velocityData = cached; return; }
+  const proxyUrl = getProxyUrl();
+  if (!proxyUrl) return;
+  _velocityTriedAt = Date.now();
   try {
-    const res  = await fetch(`${VEL_PROXY_URL}?action=velocity`);
-    const data = await res.json();
-    if (data.stores) { velocityData = data; writeCache('velocity', data); }
+    const data = await gasFetchJson(`${proxyUrl}?action=velocity&token=${encodeURIComponent(getToken())}`, 2, 30000);
+    if (data && data.ok && data.stores && Object.keys(data.stores).length) { velocityData = data; velocityError = null; writeCache('velocity', data); }
+    else { velocityError = (data && data.error) || 'no sales-speed data'; console.warn('Velocity unavailable:', velocityError); }
   } catch(e) {
+    velocityError = e.message;
     console.warn('Velocity fetch failed:', e.message);
   }
 }
@@ -8842,7 +8850,8 @@ function renderInventory() {
   const errorStores   = loadedStores.filter(s => inventoryData[s]?.error);
 
   // Trigger velocity load if not yet available; re-render when it arrives
-  if (!velocityData) {
+  // Re-asked at most every 5 minutes after a failure — the render this triggers must not trigger another.
+  if (!velocityData && Date.now() - _velocityTriedAt > 5 * 60 * 1000) {
     loadVelocity().then(() => { if (section === 'inventory') renderInventory(); });
   }
   // Trigger GM data load from Inventory proxy; re-render when it arrives
@@ -8910,7 +8919,7 @@ function renderInventory() {
 
   // Gross margin — rolling 28-day window
   // Net sales: from allDailyData (GXCore/Dutchie — already loaded)
-  // COGS: from Inventory proxy (VEL_PROXY_URL action=cogs) — decoupled from legacy sheet
+  // COGS: from this app's backend (GX Core) — decoupled from legacy sheet
   const gmStores  = getActiveStores();
   // LA, not UTC. This cutoff is compared against `ds` keys that ARE LA calendar days, so a
   // UTC-derived edge silently dropped a day of real sales out of the window every evening.
@@ -8957,8 +8966,8 @@ function renderInventory() {
       </div>
       <div class="kpi">
         <div class="klabel">Critical</div>
-        <div class="kval" style="color:${isLoaded && velReady && criticalCount > 0 ? '#EF9F27' : isLoaded && velReady ? '#5DCAA5' : ''}">${isLoaded && velReady ? criticalCount : isLoading || (isLoaded && !velReady) ? '<span class="val-skel"></span>' : '—'}</div>
-        <div class="ksub muted">${velReady ? '< 3 days on hand' : 'loading velocity…'}</div>
+        <div class="kval" style="color:${isLoaded && velReady && criticalCount > 0 ? '#EF9F27' : isLoaded && velReady ? '#5DCAA5' : ''}">${isLoaded && velReady ? criticalCount : (isLoaded && !velReady && velocityError) ? '—' : isLoading || (isLoaded && !velReady) ? '<span class="val-skel"></span>' : '—'}</div>
+        <div class="ksub muted">${velReady ? '< 3 days on hand' : velocityError ? 'sales speed unavailable' : 'loading velocity…'}</div>
       </div>
     </div>
 

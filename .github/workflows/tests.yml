@@ -35,9 +35,29 @@ jobs:
         with:
           path: greencross-sales
 
-      # Cross-repo checkout needs a PAT — the default GITHUB_TOKEN is scoped to THIS repo.
-      # Without GX_SIBLING_TOKEN the job still passes; cross_app_contract_test.js and store_palette_drift_test.js
-      # simply skip, and the summary below says so rather than letting the tick imply coverage.
+      # THE THREE SKIPS IN THIS JOB ARE CORRECT. DO NOT INVENT A PAT TO CLOSE THEM.
+      #
+      # Exactly ONE sibling repo is read by any suite here — greencross-command-center — and three
+      # suites read it: cross_app_contract_test.js, revenue_rules_contract_test.js and
+      # store_palette_drift_test.js. They are wrappers; the canonical tests live in the hub because
+      # each spans repos and neither side owns it. The hub is PRIVATE, so this spoke's default
+      # GITHUB_TOKEN cannot reach it and they SKIP on every run here.
+      #
+      # That is reduced CI coverage in this repo, not an unguarded contract, and it is covered twice
+      # over: the local pre-push hook runs them against the real sibling checkout on this desk, and
+      # greencross-command-center's own CI runs all three canonical suites with ALL SEVEN spokes
+      # checked out (they are public, so the hub needs no secret either).
+      #
+      # MEASURED 2026-09-13, because the obvious "fix" is to add public siblings and it buys nothing:
+      # checking out greencross-gx-theme or greencross-leaderboard here unlocks NO suite. No test in
+      # this repo opens either one — maintenance_wiring_test.js reads only this repo's index.html and
+      # matches the gx-theme URL as text, and it passes in CI today (14/14, run 34791786723).
+      # greencross-leaderboard is read only by the hub's canonical files, which need the hub anyway.
+      #
+      # The GX_SIBLING_TOKEN steps below are the ONLY thing that would change what runs here. They
+      # are optional and currently dormant (the secret is unset). If it is ever set, all three
+      # siblings must arrive together — the hub alone is not enough for the palette-drift tool or the
+      # revenue-rules contract, which read inventory and leaderboard through it.
       - name: Check out greencross-command-center
         if: env.GX_SIBLING_TOKEN != ''
         continue-on-error: true
@@ -109,9 +129,15 @@ jobs:
             if [ -d ../greencross-command-center ]; then
               echo "Sibling repos present — cross-repo suites ran."
             else
-              echo "> **Siblings absent.** cross_app_contract_test.js and store_palette_drift_test.js did not run here."
-              echo "> They are still gated by this repo's local pre-push hook, so this is reduced CI"
-              echo "> coverage, not an unguarded contract. Add a repo-scoped PAT as \`GX_SIBLING_TOKEN\`"
-              echo "> to close the gap."
+              # NAME ALL THREE. This line listed two of them for as long as it existed, so a reader
+              # comparing it against the three ⚠️ rows above had to work out which list was wrong —
+              # and a partial list read as complete is how the missing one gets "discovered" again.
+              echo "> **The hub is absent, so 3 wrapper suites did not run here:**"
+              echo "> cross_app_contract_test.js, revenue_rules_contract_test.js, store_palette_drift_test.js."
+              echo "> This is EXPECTED and needs no fix. greencross-command-center is private, so this"
+              echo "> repo's default GITHUB_TOKEN cannot reach it — and all three canonical suites run"
+              echo "> in the hub's own CI with every spoke checked out, plus locally here on every push"
+              echo "> through the pre-push hook. Reduced CI coverage in this repo, not an unguarded"
+              echo "> contract. **Do not add a PAT to close this.**"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

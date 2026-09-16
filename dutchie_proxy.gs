@@ -456,6 +456,22 @@ function cacheDelete_(key) {
  * query parameters we do NOT hold, which is what a session token in an echoed URL or a key in a
  * message from GX Core looks like.
  *
+ * THE SECOND PASS MUST NAME EVERY PARAMETER `requireAuth_` ACCEPTS. It shipped naming only `token`,
+ * while `requireAuth_` reads `params.token || params.session || params.auth` — so a request that
+ * presented its session as `session=` or `auth=` had a LIVE USER TOKEN pass through untouched and
+ * into the same error banner this function exists to clean. Found by core-admin (Leaderboard found
+ * it in itself first) hours after the original shipped, and reproduced HERE by execution before
+ * being believed: token redacted, session LEAKED, auth LEAKED, with secret/key/password/pwd as
+ * passing controls. The first pass cannot cover it — that one holds GX_DEPLOY_SECRET, and what
+ * escapes here is a different live credential belonging to a person, good until it expires.
+ *
+ * The defect was never the regex; it was that the list was HAND-TYPED beside a second list it had
+ * to agree with, in another function, with nothing comparing them. So the guard
+ * (`tests/secret_scrub_test.js`) DERIVES the names from the `requireAuth_` line in this file and
+ * requires each one to come back redacted. Add a way to present a session and the test fails until
+ * this regex learns it — which is the only arrangement in which these two lists cannot drift apart
+ * again. Do not "simplify" that derivation into a typed array; the typed array is the bug.
+ *
  * IT MUST NEVER BE THE REASON A RESPONSE FAILS. `gxDeploySecret_` throws when the property is
  * unset, and a scrub that throws would turn a working app into a blank one — so the whole thing is
  * wrapped and falls through to the unscrubbed body. That is the correct trade only because the
@@ -473,7 +489,7 @@ function gxScrub_(text) {
       out = out.split(_GX_SECRET_MEMO_).join('[redacted]');
     }
   } catch (e) { /* fall through — see above */ }
-  return out.replace(/([?&](?:secret|token|key|password|pwd)=)[^&\s"'\\]*/gi, '$1[redacted]');
+  return out.replace(/([?&](?:secret|token|session|auth|key|password|pwd)=)[^&\s"'\\]*/gi, '$1[redacted]');
 }
 
 /* EVERY EXCEPTION THAT BECOMES A RESPONSE GOES THROUGH HERE. jsonOut_ scrubs the finished body as

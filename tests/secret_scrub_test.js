@@ -161,6 +161,71 @@ console.log('\n6. NO SITE WAS MISSED — the part execution cannot prove');
      /function errText_[\s\S]{0,200}?gxScrub_\(/.test(code));
 }
 
+console.log('\n7. EVERY WAY TO PRESENT A SESSION IS SCRUBBED — the list DERIVED, not typed');
+{
+  /* THE DEFECT THIS PINS was never the regex. The scrub named `token`; `requireAuth_` accepts
+   * `params.token || params.session || params.auth`. Two hand-typed lists in two functions that had
+   * to agree, with nothing comparing them — so a request presenting its session as `session=` or
+   * `auth=` put a LIVE USER TOKEN in the error banner the scrub exists to clean. Shipped in the
+   * same change that added the scrub, found hours later by core-admin (Leaderboard found it in
+   * itself first), reproduced here by execution before it was believed.
+   *
+   * SO THE NAMES COME OUT OF THE SOURCE. Pin the LINE, not the spelling: find the call that
+   * validates a session, take its ARGUMENT EXPRESSION, and read every `params.<name>` out of it. A
+   * fourth way to present a session added to that line joins this list on its own and fails here
+   * until the regex learns it. Hand-typing ['token','session','auth'] here would rebuild the exact
+   * drift being fixed — one list agreeing with another by luck. */
+  const auth = grab('requireAuth_');
+  const call = /validateSessionToken_\(([\s\S]*?)\)\s*;/.exec(auth);
+  ok('requireAuth_ still validates through validateSessionToken_ (if this moved, fix the derivation)',
+     !!call);
+  const names = call ? [...call[1].matchAll(/params\.(\w+)/g)].map(m => m[1]) : [];
+  ok('derived the accepted parameter names from the source: ' + (names.join(', ') || '(none)'),
+     names.length > 0);
+
+  /* A FLOOR, AND IT IS NOT THE TYPED LIST COMING BACK. Deriving makes ADDITIONS automatic; it is
+   * blind in the other direction. Delete `session` from the auth line and it leaves this list too,
+   * so the suite goes green on a narrower app — the one change a purely derived test cannot object
+   * to. The floor makes a DELETION fail loudly and require a human to agree to it here, which is a
+   * decision point rather than drift. The distinction that matters: the derived list is what the
+   * test EXERCISES, the floor is only what it refuses to shrink below. */
+  for (const known of ['token', 'session', 'auth']) {
+    ok('`' + known + '` is still an accepted way to present a session — if this fails on purpose, '
+       + 'delete it here deliberately', names.indexOf(known) !== -1);
+  }
+
+  /* EXECUTED, not read. Each name goes through the shipped gxScrub_ inside a real
+   * `Address unavailable:` message, exactly as UrlFetchApp throws it. */
+  const ctx = scrubCtx(SECRET);
+  const LIVE = ['gx', 'fixture', 'session', 'value', 'not', 'real', '0000'].join('-');
+  for (const n of names) {
+    const msg = 'Address unavailable: https://script.google.com/macros/s/AKfycbx9/exec'
+              + '?action=stores&' + n + '=' + LIVE;
+    const out = ctx.errText_(new Error(msg));
+    ok('a session presented as `' + n + '=` is redacted out of the error text',
+       out.indexOf(LIVE) === -1);
+    ok('  and the parameter name survives, so the message still says what failed',
+       out.indexOf(n + '=[redacted]') !== -1);
+  }
+
+  /* The literal-value pass cannot stand in for this one. That memo holds GX_DEPLOY_SECRET; what
+   * leaks here belongs to a PERSON and is live until it expires — a different credential the app
+   * never holds the value of. Proven by scrubbing with no property set at all. */
+  const bare = scrubCtx('');
+  const out = bare.errText_(new Error('Address unavailable: x?session=' + LIVE));
+  ok('a user session is removed even with no deploy secret to match against',
+     out.indexOf(LIVE) === -1);
+
+  /* SCOPE, stated so the commit cannot claim more than it does: the pattern pass matches
+   * `name=value` after a ? or &. A credential sitting bare in a message — not as a query
+   * parameter — is caught only by the literal-value pass, which knows GX_DEPLOY_SECRET alone. No
+   * path was found that embeds a bare session token in an error; this records the limit rather
+   * than pretending it is covered. */
+  const loose = ctx.errText_(new Error('session ' + LIVE + ' expired'));
+  ok('KNOWN LIMIT (documented, not a bug): a BARE token outside a query string is not matched',
+     loose.indexOf(LIVE) !== -1);
+}
+
 /* MUTATION LOG — each assertion above was shown failing against a deliberately broken source on
  * 2026-09-15, and the failure named what broke:
  *   · gxScrub_ returning its input unchanged            → 6 assertions across 1, 2 and 4, 5
@@ -173,6 +238,21 @@ console.log('\n6. NO SITE WAS MISSED — the part execution cannot prove');
  * Note what the last two show between them, because it is the reason for having both layers: the
  * site check and the backstop check fail INDEPENDENTLY. Break either layer and exactly one
  * assertion goes red, which is what tells you the other layer is not quietly covering for it.
- * A clean run against already-scrubbed code proves nothing; that is the whole lesson of the note. */
+ * A clean run against already-scrubbed code proves nothing; that is the whole lesson of the note.
+ *
+ * SECTION 7 added 2026-09-15, mutation-verified the same way and in three directions, because the
+ * three say different things:
+ *   · the regex reverted to the SHIPPED list (secret|token|key|password|pwd)
+ *                                                → 5 fail: session= and auth= both carry the token
+ *                                                  through, and it survives with no property set
+ *   · `|| params.auth` DELETED from the auth line → 1 fail: the floor. Nothing else notices, which
+ *                                                  is the entire reason the floor is there
+ *   · `|| params.sid` ADDED to the auth line      → 2 fail: `sid=` joined the exercised list on its
+ *                                                  own and failed until the regex would learn it
+ *
+ * The third is the one that proves the derivation is real rather than decorative: no edit was made
+ * to this file, and the new name tested itself. The second proves the derivation is ALSO blind
+ * downward, which is why both mechanisms are here and why collapsing them into one typed array
+ * would quietly restore the bug this section exists for. */
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

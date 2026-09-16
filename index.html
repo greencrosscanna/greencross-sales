@@ -1537,7 +1537,17 @@ let expBudgetsOverlaid = new Set(); // categories whose budget is an applied sma
 // licenses, management. Server-side (set in the budget planner) because this tab is the
 // consumer: pacing a once-billed category against a day-30 fraction calls it "over" every month.
 let expBillsOnce = new Set();
+/* HOW OLD THE BUDGETS ON SCREEN ARE, in ms, or null when they are current. Not a boolean: a stale
+   figure has to be shown WITH ITS AGE, and an age the reader is given must come from the cache
+   entry's own timestamp rather than from when the failure was noticed. Set in exactly one place
+   (applyExpBudgets_) so the flag and the numbers cannot disagree. */
+let expBudgetsAgeMs = null;
 let otherRevData  = null; // { atm: { Jan: 9493, ... }, sublet: { Jan: 0, ... } }
+let otherRevAgeMs = null; // as above, for the ATM/sublet figures the Income hero folds into net
+/* "Asked and answered" — NOT "we have data". The hero cannot say ATM and sublet are missing until
+   the call that fetches them has finished, or every cold boot accuses a load that is still running.
+   Same distinction salesPending() draws for the store fetches. */
+let otherRevTried = false;
 let revenueDetail = null; // { cfg, atm, sub, year } — full per-machine breakdown
 let periodGoalsCache = {};
 let paceFracs = null; // { storeName: 0-1 frac } from GXCore.expectedSalesFrac — today only
@@ -2637,6 +2647,77 @@ function readCache(key) {
   } catch { return null; }
 }
 
+/* ── THE LAST GOOD COPY IS STILL ON DISK. readCache WILL NOT HAND IT TO YOU ────────────────────────
+ *
+ * readCache returns null the instant an entry passes its TTL — correct, that is what a TTL is — and
+ * it deliberately does NOT delete the entry (the bug Inventory has: destroying the fallback at
+ * exactly the moment it becomes the only thing left). So the bytes are still there, unread, while a
+ * failed re-fetch leaves the screen with nothing.
+ *
+ * That gap costs two screens a real answer. Neither goes blank; both say something CONFIDENT and
+ * wrong, which is worse:
+ *
+ *   expbudgets — a 24h entry, fetched once per session when the Expenses tab is first opened, over
+ *     the slowest route in the app (measured 8.8s, 2026-09-06). Miss it and every category's budget
+ *     reads 0, so every `expected to date` is `—`, the "Categories off pace" tile reads `0 of N`,
+ *     and the rail says "Nothing is running ahead of its budget." — an all-clear over no data, the
+ *     Inventory tile's green 0 again. On the PHONE the budget bar and its sub-line simply vanish and
+ *     nothing is said at all.
+ *   otherrev — a 24h entry that the Income hero folds into net: `net = dutchieNet + otherRevTotal`.
+ *     Miss it and otherRevTotal is 0, so the company figure is short ATM and sublet with no marker
+ *     anywhere. The River shape: a per-part failure degrading into a smaller number, not a message.
+ *
+ * Both payloads are nearly static — an annual budget and a typed-in monthly ATM figure — so
+ * yesterday's copy is almost always this morning's answer. Serving it LABELED WITH ITS OWN AGE beats
+ * both alternatives. Serving it unlabeled does not, which is why every caller here reads `ageMs` and
+ * renders it.
+ *
+ * TWO TIERS, THE SAME SHAPE THE SALES HISTORY CACHE ALREADY HAS. There, SALES_TTL_HIST (1h) is
+ * FRESH and SALES_HIST_PAINT_MAX (72h) is still PAINTABLE. This is that idea for the generic cache,
+ * and it reuses the same 72h for the same reason rather than inventing a second number: a Monday
+ * open after a weekend away still has something to show, and a figure older than that is not worth
+ * putting under a variance someone acts on.
+ *
+ * THE AGE COMES OFF THE ENTRY'S OWN `ts`, never off the moment the failure was noticed. Those two
+ * are the same number only when the fetch fails on the first try; when a retry ladder has been
+ * running for a minute they are not, and "1 min ago" over an hour-old board is the exact bug
+ * Leaderboard shipped on 2026-09-16. There is no path here that can produce a clock other than the
+ * entry's, because nothing but the entry is read.
+ *
+ * It NEVER deletes and it never writes. A stale read must not be able to cost the next load the
+ * entry it just used. */
+const CACHE_STALE_MAX = 72 * 60 * 60 * 1000;
+
+function readStaleCache(key, maxAgeMs) {
+  const cap = maxAgeMs == null ? CACHE_STALE_MAX : maxAgeMs;
+  let entry = null;
+  if (SESSION_MEM_KEYS.has(key)) {
+    entry = sessionMemCache[key] || null;
+  } else {
+    try { entry = JSON.parse(localStorage.getItem('gc_cache_' + key) || 'null'); }
+    catch { return null; }
+  }
+  if (!entry || typeof entry.ts !== 'number' || entry.data == null) return null;
+  const ageMs = Date.now() - entry.ts;
+  /* A NEGATIVE AGE IS NOT A FRESH ENTRY. A clock moved backwards (timezone change, a corrected
+     device clock) would otherwise read as "0 min ago" on an arbitrarily old payload — a stale
+     number wearing a live label, which is the one outcome this whole helper exists to prevent. */
+  if (ageMs < 0 || ageMs > cap) return null;
+  return { data: entry.data, ts: entry.ts, ageMs };
+}
+
+/* How old, in words, for a reader. Rounds DOWN to the unit it names and never says "0" — an entry
+   is always at least "just now", never "0 min ago", which reads as a claim of liveness. */
+function fmtCacheAgo_(ms) {
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return hrs + (hrs === 1 ? ' hour ago' : ' hours ago');
+  const days = Math.floor(hrs / 24);
+  return days + (days === 1 ? ' day ago' : ' days ago');
+}
+
 /** Evict ALL historical (non-current-month) sales cache entries to free space. */
 function evictHistoricalSalesCache() {
   const curYear = new Date().getFullYear();
@@ -2846,6 +2927,10 @@ function clearAllCache() {
     .forEach(k => localStorage.removeItem(k));
   Object.keys(sessionMemCache).forEach(k => delete sessionMemCache[k]);
   _expBudgetsTried = false;   // cleared budgets have to be re-fetchable, not just absent
+  /* "Clear cache" deletes the gc_cache_ entries the stale fallbacks read, so nothing can be served
+     stale after this — but the AGE FLAGS would outlive the data they describe and keep a
+     "cached copy from 2 days ago" caption under numbers that were just refetched. */
+  expBudgetsAgeMs = null; otherRevAgeMs = null; otherRevTried = false;
   inventoryData = {};
   allDailyData  = {};
   clearLiveData();      // was missing — without it the on-screen figure survived a "clear" (the July 736k trap)
@@ -5471,7 +5556,18 @@ function _incomeBreakdownDskHtml(stores, storeNets, isClosed, elapsedPct, yr, da
 }
 
 function _incomeOtherRevHtml() {
-  if (activeDay || activeWeek || !otherRevData) return '';
+  // Day and week views exclude ATM and sublet from net by design, so there is nothing to report.
+  if (activeDay || activeWeek) return '';
+  /* THE HERO ABOVE THIS IS SHORT BY WHATEVER IS MISSING HERE, and it is the one place that can say
+     so — `net = dutchieNet + otherRevTotal`, and computeOtherRev returns 0 for a payload that never
+     arrived exactly as it does for a month that genuinely took nothing. Returning '' left the total
+     understated under a confident live dot with no marker anywhere.
+     GATED ON `otherRevTried`, NEVER ON `!otherRevData`: this call is in the boot wave, so a null
+     during a load means "not asked yet" and printing a failure there is the `No data available`
+     verdict again. */
+  if (!otherRevData) return otherRevTried ? `<div class="sec-lbl">Other revenue</div>
+    <div class="card"><div class="exp-hint" style="padding:9px 0">ATM and sublet did not load, so
+      they are <b>not</b> included in the net sales figure above.</div></div>` : '';
   const isYTD = activeMonth === MONTH_YTD;
   const _raw = type => {
     const d = otherRevData[type];
@@ -5504,6 +5600,11 @@ function _incomeOtherRevHtml() {
       ${(atmVal + subletVal) > 0 ? `<div class="srow" style="border-top:1px solid var(--border-strong);margin-top:6px;padding-top:6px">
         <div class="sname" style="flex:1;color:#aaa;font-size:11px">Included in net sales</div>
         <div class="sval">${fmtK(atmVal + subletVal)}</div>
+      </div>` : ''}
+      ${/* These figures ARE in the hero total, so if they are a stale copy the hero is partly stale
+            and the reader has to be told. The age is the entry's own, printed as it is. */
+        otherRevAgeMs != null ? `<div class="srow" style="border-top:1px solid var(--border-strong);margin-top:6px;padding-top:6px">
+        <div class="sname" style="flex:1;color:var(--muted);font-size:11px">Cached copy from ${escHtml(fmtCacheAgo_(otherRevAgeMs))} — the live figures did not answer</div>
       </div>` : ''}
     </div>`;
 }
@@ -6004,9 +6105,7 @@ async function loadExpBudgets() {
   // Older cache entries hold the bare budgets map; newer ones wrap it with the overlay list. Read
   // both shapes so a cached page from before this build doesn't render an empty Expenses tab.
   if (cached) {
-    expBudgets = cached.budgets || cached;
-    expBudgetsOverlaid = new Set(cached.overlaid || []);
-    expBillsOnce = new Set(cached.bills_once || []);
+    applyExpBudgets_(cached, null);
     return;
   }
   const proxyUrl = getProxyUrl();
@@ -6015,27 +6114,51 @@ async function loadExpBudgets() {
     const res  = await fetch(`${proxyUrl}?action=expbudgets&token=${encodeURIComponent(getToken())}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    expBudgets = data.budgets;
-    // Which categories are showing an APPLIED smart budget rather than the sheet's own number.
-    // Carried through the cache too — dropping it there would make the badges vanish on the next
-    // load while the numbers stayed overlaid, which is the confusing half of both states.
-    expBudgetsOverlaid = new Set(data.overlaid || []);
-    // Which categories bill once rather than accruing. Cached alongside the budgets for the same
-    // reason `overlaid` is: dropping it from the cache would silently start pacing rent again on
-    // the next load, and the tab would look exactly the same while being wrong.
-    expBillsOnce = new Set(data.bills_once || []);
+    // Which categories are showing an APPLIED smart budget rather than the sheet's own number, and
+    // which bill once rather than accruing. Both are carried through the cache: dropping `overlaid`
+    // there would make the badges vanish on the next load while the numbers stayed overlaid, and
+    // dropping `bills_once` would silently start pacing rent again with the tab looking identical.
+    applyExpBudgets_(data, null);
     writeCache('expbudgets', { budgets: data.budgets, overlaid: data.overlaid || [],
                                bills_once: data.bills_once || [] });
   } catch(e) {
     console.warn('ExpBudgets fetch failed:', e.message);
+    /* THE LAST GOOD BUDGET BEATS NO BUDGET, AND IT HAS TO SAY SO. Without this the whole tab loses
+       its comparison: every `expected to date` renders `—`, the off-pace tile reads `0 of N`, and
+       the rail announces "Nothing is running ahead of its budget" over nothing at all. A budget is
+       an annual plan changed by a deliberate Apply, so the copy readCache just refused for being
+       25 hours old is almost certainly still the current one. Age comes off the ENTRY, and every
+       surface that shows a budget figure prints it. */
+    const stale = readStaleCache('expbudgets');
+    if (stale) {
+      applyExpBudgets_(stale.data, stale.ageMs);
+      console.warn('[expbudgets] serving a cached copy from ' + fmtCacheAgo_(stale.ageMs));
+      return;
+    }
     expBudgets = null;
     expBudgetsOverlaid = new Set();
+    expBillsOnce = new Set();
+    expBudgetsAgeMs = null;
   }
+}
+
+/* ONE PLACE THAT UNPACKS A BUDGETS PAYLOAD, because there are three callers of it now — the fresh
+   fetch, the fresh cache and the stale cache — and a hand-repacked object literal loses a field
+   every time the payload grows one, silently (the screenshot that died one line short of the board).
+   `ageMs` is null for anything a reader may treat as current and a number otherwise; it is the ONLY
+   thing that distinguishes the three, and it is never derived from the clock at the call site.
+   Older entries hold the bare budgets map; newer ones wrap it — both shapes are read, so a cached
+   page from before that change does not render an empty Expenses tab. */
+function applyExpBudgets_(payload, ageMs) {
+  expBudgets         = payload.budgets || payload;
+  expBudgetsOverlaid = new Set(payload.overlaid || []);
+  expBillsOnce       = new Set(payload.bills_once || []);
+  expBudgetsAgeMs    = ageMs;
 }
 
 async function loadOtherRevenue() {
   const cached = readCache('otherrev');
-  if (cached) { otherRevData = cached; return; }
+  if (cached) { otherRevData = cached; otherRevAgeMs = null; otherRevTried = true; return; }
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
   try {
@@ -6043,11 +6166,31 @@ async function loadOtherRevenue() {
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     otherRevData = data;
+    otherRevAgeMs = null;
     writeCache('otherrev', data);
     console.log('Other revenue loaded from API');
   } catch(e) {
     console.warn('OtherRev fetch failed:', e.message);
-    otherRevData = null;
+    /* THE HERO ADDS THIS TO NET SALES. `net = dutchieNet + otherRevTotal`, so leaving this null
+       does not blank anything — it makes the company figure quietly SMALLER by the size of the ATM
+       take, under the same confident live dot, with nothing on screen saying a part is missing.
+       That is the River shape and it is the one failure mode this app keeps finding. ATM and sublet
+       are typed-in monthly figures that change once a month, so the expired entry is the right
+       answer; it just has to be labeled as one. */
+    const stale = readStaleCache('otherrev');
+    if (stale) {
+      otherRevData  = stale.data;
+      otherRevAgeMs = stale.ageMs;
+      console.warn('[otherrev] serving a cached copy from ' + fmtCacheAgo_(stale.ageMs));
+    } else {
+      otherRevData  = null;
+      otherRevAgeMs = null;
+    }
+  } finally {
+    /* ASKED AND ANSWERED, whatever the answer was. The Income tab must be able to tell "this did
+       not load" from "this has not been asked for yet" — saying the first during boot is the
+       `No data available` verdict bug, one tab over. */
+    otherRevTried = true;
   }
 }
 
@@ -6527,10 +6670,35 @@ async function reloadExpenses() {
  * re-renders this tab, so a liveness check alone would re-fire forever against a broken backend.
  * The ↻ refresh button and clearAllCache reset it, which is what makes a real retry possible. */
 let _expBudgetsTried = false;
+let _expBudgetsLoading = false;
 function ensureExpBudgets() {
   if (expBudgets || _expBudgetsTried) return;
   _expBudgetsTried = true;
-  loadExpBudgets().finally(() => { if (section === 'expenses') renderExpenses(); });
+  _expBudgetsLoading = true;
+  loadExpBudgets().finally(() => {
+    _expBudgetsLoading = false;
+    if (section === 'expenses') renderExpenses();
+  });
+}
+
+/* WHERE THE BUDGET ON THIS TAB CAME FROM — one definition, read by BOTH renderings.
+ *
+ * Three states wear the same face in the markup (`totalBudget === 0`) and mean opposite things:
+ * still being fetched, fetched and refused, and fetched fine with nothing budgeted for the period
+ * on screen. The tab used to render all three as "No budget set for this period" on the desktop and
+ * as SILENCE on the phone — a verdict where there was only a question, which is the same error as
+ * `No data available` during a load.
+ *
+ * Desktop and phone are two renderings by `matchMedia`, not one markup with CSS hiding the other,
+ * so the sentence has to come from one function or the two will drift within a release — the same
+ * rule storeNotCurrent_ and _heroLiveHtml_ already share. */
+function expBudgetOrigin_() {
+  if (_expBudgetsLoading && !expBudgets) return { state: 'loading', text: 'Budgets still loading…' };
+  if (!expBudgets) return { state: 'missing',
+    text: 'Budgets did not load — nothing on this tab is being compared against one. Try ↻ refresh.' };
+  if (expBudgetsAgeMs != null) return { state: 'stale',
+    text: 'Budgets are a cached copy from ' + fmtCacheAgo_(expBudgetsAgeMs) + ' — the live figures did not answer.' };
+  return { state: 'ok', text: '' };
 }
 
 function renderExpenses() {
@@ -6695,7 +6863,13 @@ function renderExpenses() {
                 <div class="exp-att-var">${fmtSigned(c.variance)}</div>
                 <div class="exp-att-pct">${Math.round(c.val / c.budget * 100)}%</div>
               </div>`).join('')
-              : '<div class="exp-hint" style="padding:9px 0">Nothing is running ahead of its budget.</div>'}
+              /* AN EMPTY LIST IS NOT AN ALL-CLEAR WHEN THERE IS NOTHING TO COMPARE. With no budgets
+                 every variance is null, so this list is empty for want of asking and the card read
+                 "Nothing is running ahead of its budget" over no data — the Inventory tile's green
+                 0. It keeps the reassurance only when a budget was actually there to beat. */
+              : `<div class="exp-hint" style="padding:9px 0">${expBudgetOrigin_().state === 'ok'
+                  ? 'Nothing is running ahead of its budget.'
+                  : escHtml(expBudgetOrigin_().text)}</div>`}
           </div>
         </div>
 
@@ -6742,6 +6916,7 @@ function renderExpenses() {
 function _expKpis(total, totalBudget, expectedTotal, paceVar, totalNet, offPaceN, catN,
                   offPaceWorth, underN, expPacingPct, barPct) {
   const hasBudget = totalBudget > 0;
+  const origin    = expBudgetOrigin_();
   const pctNet    = totalNet > 0 ? total / totalNet * 100 : null;
   return `
     <div class="exp-kpis">
@@ -6762,7 +6937,14 @@ function _expKpis(total, totalBudget, expectedTotal, paceVar, totalNet, offPaceN
         <div class="exp-foot">
           <span class="exp-foot-item"><span class="exp-swatch"></span>${fmtK(expectedTotal)} expected by now</span>
           <span class="exp-foot-item"><span class="exp-swatch budget"></span>Full-period budget ${fmtK(totalBudget)}</span>
-        </div>` : `<div class="exp-tsub">No budget set for this period</div>`}
+        </div>
+        ${origin.state === 'stale' ? `<div class="exp-tsub">${escHtml(origin.text)}</div>` : ''}` :
+        /* "No budget set for this period" is only one of the three ways this tile can have no
+           budget, and it is the only one that is a VERDICT. Saying it while the fetch is in flight,
+           or after it failed, states as fact something nobody has established. */
+        `<div class="exp-tsub">${origin.state === 'ok'
+            ? 'No budget set for this period'
+            : escHtml(origin.text)}</div>`}
       </div>
 
       <div class="exp-tile">
@@ -6903,6 +7085,7 @@ function _expExpand(c) {
 function renderExpensesMobile(cats, total, totalBudget, totalNet, expPacingPct) {
   const sorted = [...cats].sort((a, b) => b.val - a.val);
   const budgetDiff = totalBudget > 0 ? total - totalBudget : null;
+  const budgetOrigin = expBudgetOrigin_();
   destroyCharts();
   document.getElementById('main-content').innerHTML = `
     <div class="kpi-grid">
@@ -6917,6 +7100,12 @@ function renderExpensesMobile(cats, total, totalBudget, totalNet, expPacingPct) 
         <div class="ksub">Budget ${fmtK(totalBudget)} &nbsp;·&nbsp; ${Math.round(total/totalBudget*100)}%
           &nbsp;·&nbsp; <span class="${budgetDiff>0?'bad':'good'}">${fmtK(Math.abs(budgetDiff))} ${budgetDiff>0?'over':'under'}</span>
         </div>` : totalNet > 0 ? `<div class="ksub muted">${Math.round(total/totalNet*100)}% of net sales</div>` : ''}
+        ${/* THE PHONE SAID NOTHING AT ALL. With no budgets the bar and its sub-line above simply
+              vanish, so the tab renders as a budget-free view of spend and the reader is never told
+              a comparison is missing — on the device every slow-load report in this repo came from.
+              The desktop at least printed a (wrong) sentence. */
+          budgetOrigin.state === 'ok' ? '' :
+          `<div class="ksub muted">${escHtml(budgetOrigin.text)}</div>`}
       </div>
       <div class="kpi">
         <div class="klabel">Largest category</div>
@@ -8489,7 +8678,7 @@ async function sbpToggleBillsOnce(cat) {
     if (!data.ok) throw new Error(data.error || 'save failed');
     // The Expenses tab's copy of the flags is now stale.
     localStorage.removeItem('gc_cache_expbudgets');
-    expBudgets = null;
+    expBudgets = null; expBudgetsAgeMs = null;
   } catch (e) {
     alert('Could not save the "bills once" flag: ' + e.message);
     budgetBillsOnce.has(cat) ? budgetBillsOnce.delete(cat) : budgetBillsOnce.add(cat);
@@ -8539,7 +8728,7 @@ async function applyBudgetSelected() {
     // have to go — otherwise the Expenses tab keeps rendering the pre-apply numbers for 30 minutes
     // and the apply looks like it silently failed.
     localStorage.removeItem('gc_cache_expbudgets');
-    expBudgets = null; budgetProposal = null; expenseData = null; expBreak = null;
+    expBudgets = null; expBudgetsAgeMs = null; budgetProposal = null; expenseData = null; expBreak = null;
     await loadExpBudgets();
   } catch (e) {
     alert('Apply failed: ' + e.message);
@@ -8558,7 +8747,7 @@ async function revertBudget(cat) {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'revert failed');
     localStorage.removeItem('gc_cache_expbudgets');
-    expBudgets = null; budgetProposal = null; expenseData = null; expBreak = null;
+    expBudgets = null; expBudgetsAgeMs = null; budgetProposal = null; expenseData = null; expBreak = null;
     await loadExpBudgets();
   } catch (e) {
     alert('Revert failed: ' + e.message);
@@ -9149,7 +9338,7 @@ function hardReset() {
   clearAllCache();
   hiddenExpCats.clear(); localStorage.removeItem('hiddenExpCats');
   hiddenOtherRevs.clear(); localStorage.removeItem('hiddenOtherRevs');
-  expenseData = null; expBudgets = null; otherRevData = null; invGmData = null; revenueDetail = null; _invGmLoading = false;
+  expenseData = null; expBudgets = null; expBudgetsAgeMs = null; otherRevData = null; otherRevAgeMs = null; otherRevTried = false; invGmData = null; revenueDetail = null; _invGmLoading = false;
   expBudgetsOverlaid = new Set(); budgetProposal = null; budgetLoading = false; budgetChecked = new Set(); budgetExpanded = new Set();
   clearLiveData();
   updateCacheStatus();

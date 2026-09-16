@@ -762,6 +762,63 @@ can see.
 *GX Core has no scrub helper of its own and its `doGet` catch returns `err.message` raw; that is
 core-admin's item and is PR-gated as a library cut.*
 
+### The scrub named ONE of the three ways to send a session (fixed 2026-09-15, `2b8f957`)
+
+*Cited by commit, deliberately: this shipped with **no `APP_VERSION` bump** — see the last bullet —
+so there is no version number to name it by. `APP_VERSION` is still v2.599 and `app_versions` still
+reads `decc9db`. **`core_pins` is what answers "what is this app running"**, written BY the deploy —
+its row for `sales` carries **`deployed_sha`** (`2b8f9571b…`, alongside `lib_version` 331 and
+`observed_by`), which is the field to read and is not called `sha`. A future session reading
+`version_history` and concluding otherwise is reading the wrong table.*
+
+**The fix above shipped leaking, and it was found hours later — by core-admin, after Leaderboard
+found the shape in itself.** `gxScrub_`'s pattern pass named `secret|token|key|password|pwd`.
+`requireAuth_` accepts **`params.token || params.session || params.auth`**. So a request presenting
+its session as `session=` or `auth=` had a **live user token** pass through untouched, into exactly
+the error banner the scrub exists to clean.
+
+Reproduced HERE by execution before it was believed — `token` redacted, `session` LEAKS, `auth`
+LEAKS, with `secret`/`key`/`password`/`pwd` as passing controls.
+
+- **The literal-value pass cannot cover it.** That memo holds `GX_DEPLOY_SECRET`. What escapes here
+  belongs to a **person** and is live until it expires — a different credential whose value this
+  app never holds, so there is nothing to match against.
+- **Nothing we ship can reach it, which is why it survived.** `index.html` sends `&token=` 27 times
+  and never `session=` or `auth=`; the exposure needs a request shaped by hand or by another
+  client. **Do not "tidy" the two unused names off the auth line on that basis** — verified live,
+  all three genuinely authenticate (`?action=stores` returns the full registry via each), and
+  deleting one is the single change the derived guard below **cannot object to**, because the name
+  would leave the test's list along with the app's.
+- **The defect was never the regex — it was two hand-typed lists in two functions that had to
+  agree, with nothing comparing them.** So `tests/secret_scrub_test.js` §7 **DERIVES** the accepted
+  names from the `validateSessionToken_(` argument expression in the source and requires each to
+  come back redacted. Pin the LINE, not the spelling: a fourth way to present a session joins the
+  list on its own. Hand-typing `['token','session','auth']` there rebuilds the exact drift.
+- **A derived list is blind DOWNWARD, so there is also a floor.** Additions are automatic;
+  deletions are invisible, and a narrowed app would go green. The floor asserts the three are still
+  accepted, so a removal fails loudly and a human has to agree to it in the test. **It is not the
+  typed list coming back** — it never sources what gets exercised, it only refuses shrinkage.
+- **Mutation-verified in three directions, because they say different things:** the regex reverted
+  to the shipped list → 5 fail (the real bug); `|| params.auth` deleted → 1 fail, the floor, and
+  *nothing else notices*; `|| params.sid` **added** → 2 fail, with `sid=` testing **itself** and no
+  edit to the test file. **The third is the only evidence the derivation is real rather than
+  decorative.**
+- **Known limit, pinned by an assertion rather than papered over:** the pattern pass matches
+  `name=value` after a `?` or `&`. A credential sitting **bare** in a message is caught only by the
+  literal-value pass. No path was found that embeds one; the assertion stops the next reader
+  assuming coverage.
+- Backend only — `index.html` untouched, so **no `APP_VERSION` bump**: that constant is a reload
+  TRIGGER, not a label (`gcCheckVersion`), and there was nothing for a tab to re-fetch.
+
+**THE THROUGH-LINE, AND IT IS SHARPER THAN "A CHECK CAN FAIL TO FAIL."** Five defects surfaced the
+night of 2026-09-15 where a fix covered *most* of the doors: this file's 54 exits against a
+choke-point fix, Leaderboard's nine catches, its token-only regex, this one, and the derived list
+that would itself have gone green on a narrower app. **Not one was found by re-reading the fix.**
+Every one came from **counting the exits, comparing against something outside the fix, or mutating
+it.** Re-reading is what produced all five; it is the activity that feels like verification and
+is not. *Two of the five were in fixes that had shipped the same day and looked complete —
+including the one directly above this section.*
+
 ### The screenshot died one line short of the board (v2.598, 2026-09-15)
 
 Filed by core-admin, measured live: **140 bug reports across all seven apps, not one with a

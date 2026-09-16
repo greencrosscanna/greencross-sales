@@ -554,6 +554,64 @@ store falls to the next 60s poll.
 Browser, cold, live backend (proxy change not yet deployed): fast stores' today at ~7s; three hit
 28s and their retries answered in ~6s; last store 36s — where v2.591 would have fallen to the poll.
 
+## ~4% of /exec requests just don't come back — and the ceiling decided what that cost (v2.597)
+
+Sky, 2026-09-15, on v2.596: *"still taking 60+sec to load on mobile."* Same sentence as v2.592,
+different cause — v2.592 fixed the slow HOP and left the stall standing.
+
+**MEASURED that day against this app's live `/exec`, six requests at a time the way a load fires
+them, 234 requests: median 3.1s, p95 4.1s — and eight of them (3.4%) took 11 to 60 seconds while
+the five requests beside them answered in three.** Sequentially, 25 of 25 were clean. So it is not
+a slow store, not a slow month, not a busy backend and not concurrency: it is the `/exec` hop
+intermittently failing to come back, and it hits a request at random. **A boot fires about sixteen,
+so roughly HALF of all loads carry one**, and a load is only as fast as its slowest request.
+
+This is the same Google-side flake the repo already documents as "~6% of rapid calls 404". The new
+part is that it also presents as a **hang**, which is much more expensive, because a 404 fails
+immediately and a hang costs whatever ceiling it is given.
+
+**v2.592's 28s x 2 was the ceiling, and it was right for the wrong failure.** 28s was chosen from a
+measured Dutchie hop of 11.7-23.6s, and for a slow hop it is correct. For a stall it is 28 seconds
+spent discovering that a request died at second one — twice, before a retry that succeeds in three.
+57 seconds. That is the 60.
+
+- **The budget is now a LIST of per-attempt ceilings** (`gasFetchJson(url, null, CAPS)`), which sets
+  both how many attempts there are and how long each may take, so the count and the ceilings cannot
+  drift apart. Live `[12000, 25000]`; settled `[8000, 12000, 16000]`.
+- **12s first, from the EVENING hop, not the median.** The same six stores measured 3.1-7.0s at
+  midday and ~10.5s at 18:00 the same day. **What makes the exact number unimportant is that being
+  wrong is cheap now:** an abandoned request runs to completion on Apps Script anyway and leaves its
+  answer in `dutchieTodayFetch_`'s 90s cache, so attempt two is a ~3s cache read rather than a second
+  pull. Three seconds too low costs three seconds; eighteen too high cost the load. **Err short.**
+- **25s second, because it must outlast the wait the SERVER is already honoring for it.**
+  `dtodayAwaitFlight_` holds a joining request up to `DTODAY_WAIT_MS_` (25s). Caught while building
+  this, in the browser: with 14s there, Bend spent fourteen seconds waiting on a pull it then threw
+  away and had to ask a third time. **Two numbers describing one wait, in two files and two
+  languages** — `tests/phase_split_test.js` reads both and fails if they part company (verified by
+  mutation from either side).
+- **Settled gets a third attempt where live gets two**, because a settled failure does not merely
+  delay a store — `fetchMonthData` does not re-try a timeout, so the store FAILS and drops out of
+  the company total. The River shape again: a smaller number, not an error.
+- **12+25+backoff ≈ 38s, against 57s.** Still inside one 60s poll, which is the hard constraint:
+  `_loadAllStoresInFlight` blocks the very poll that would recover a store.
+- Browser, mobile viewport, live backend: cold with the hop at ~10.5s, five of six hit the first
+  ceiling and their retries answered in ~3s, landing at ~14s; warm, all six answered in 2.2-4.3s
+  with no second attempt at all. `tests/background_refresh_test.js` EXECUTES `gasFetchJson` and
+  asserts the delay each abort timer is armed with, in order; every source-read guard is verified by
+  mutation (flat cap, 28s x 2, a chain that outruns the poll).
+
+**What this does NOT fix, and is not ours to fix:** the stall itself. Google's hop is going to keep
+dropping ~4% of requests, and the only lever this app has is how fast it gives up on one. If loads
+still feel long, re-measure the RATE before re-tuning the ceiling — `python3` firing six parallel
+requests at `/exec` is the whole instrument, and a `loadprobe` walk cannot see this at all, because
+it measures the server's own work and the stall happens outside it.
+
+*One measurement trap worth keeping: a test written `ok(cond, label)` in a file whose `ok` is
+`ok(label, cond)` passes unconditionally — the cross-file wait assertion above shipped that way for
+one run and reported PASS against a deliberately broken source. Caught only by mutating it. This is
+the third instance in this repo of a guard that could not fail; the rule is unchanged and it is the
+only thing that catches them.*
+
 ## The Inventory tab's sales speed comes through GX Core — and was a green 0 until v2.596
 
 The Critical tile (products under 3 days on hand) fetched velocity straight from a hardcoded

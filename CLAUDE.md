@@ -730,6 +730,70 @@ five 25s timeouts, a 20s timeout and two of the documented second-hop 404s — f
 app was tuned for, and still unexplained. This makes a bad load survivable; it does not make it
 rarer. Re-measure the rate with `tools/exec_stall_probe.py` before tuning any ceiling.
 
+### The 40% day — what a bad /exec morning looks like, and what does NOT fix it (2026-09-16)
+
+Sky: *"it took 4 minutes for it to load on my phone this morning."* The section above is about a
+~4% stall rate. **This is what happens at ten times that**, and the useful part is the list of
+things that look like fixes and are not.
+
+**MEASURED, low-volume so it cannot be self-inflicted** — 18 requests (one cold load's worth), then
+90 seconds of silence, repeated, against the public `libversion` route so nothing of ours is in the
+timing:
+
+| 09:27 | 09:31 | 09:33 | 09:37 | 09:40 | 09:42 | 09:45 | 09:49 |
+|---|---|---|---|---|---|---|---|
+| 50.0% | 33.3% | 38.9% | 55.6% | 27.8% | 38.9% | 50.0% | **0.0%** |
+
+Median request 2.2s-11.1s against a 2.3s healthy median. **It is not a fat tail — the whole
+distribution moves, minute to minute.** A stalling minority against a healthy majority would hold
+the median near 2.5s; it plainly does not. core-admin measured the same shape independently
+(p50 2.6s at 07:27 -> 10.0s at 09:20, 23.3% then 57.5%).
+
+- **ONE READING PROVES NOTHING TODAY. Sample 8 is 0.0%** — clean, 2.2s median, nine minutes after a
+  50% sample. Anyone who probes once and stops will call it recovered and be wrong four minutes
+  later. **Deciding "the endpoint is quiet" needs several bursts over several minutes**, which is
+  the shape `tools/exec_stall_probe.py` plus a sleep between runs gives you. This is why the GXCore
+  332 re-pin was deferred rather than attempted on a good-looking probe (Sky's call).
+- **FEWER REQUESTS PER LOAD DOES NOT HELP A BAD DAY, AND THE ARITHMETIC IS COUNTER-INTUITIVE.** At
+  ~3% per request a 16-request cold load carries a stall **38.6%** of the time and halving the count
+  takes it to **21.6%** — batching is worth doing. At ~40% a 12-request load carries one **99.8%**
+  of the time and a 6-request load **95.3%**. Both round to *every load*. So "just make fewer calls"
+  is right in the ordinary world and buys nothing in the bad one — and it is the first thing a
+  session under pressure to DO something on a bad morning will reach for. Verified by computation,
+  not asserted.
+- **The lever that works on a bad day is RETRIES — how many stalls get recovered — not request count
+  and not ceilings.** Ceilings decide what a stall COSTS; retries decide how many are LOST; neither
+  touches how often Google drops one. At ~40% per request a 2-attempt ladder loses ~16% of halves
+  and a 3-attempt one ~6%.
+- **A third LIVE attempt is therefore a real measured argument, and was deliberately NOT taken.**
+  It would cost every ordinary load forever on the evidence of one morning — which is the v2.592
+  mistake exactly: a ceiling set from one evening's measurement, correct for the failure in front of
+  it and wrong for the one that recurred. **Second bad day first, and decide on a distribution
+  rather than a morning.** core-admin now records per-request `(start_offset, duration)` so that
+  decision can be measured instead of judged.
+- **NOTHING CLIENT-SIDE FIXES THIS.** Worth saying plainly rather than implying a change is pending.
+
+**Two limits on the evidence, recorded because both were nearly over-cited:**
+
+- **The cold-load run that "reproduced" the complaint is a SIMULATION of the ladder in Python, not a
+  browser.** It replays the real ceilings and retry behavior against the live endpoint — 54.9s to the
+  last request, 8 of 12 halves stalled, Hillsboro and Center lost — but it does not exercise
+  `fetchMonthData`'s outer retry, the in-flight guard or the progressive render. So *"Hillsboro
+  leaves the company total"* is what the ladder IMPLIES, not something anyone watched happen. It is
+  the right implication — a timed-out SETTLED half is not retried, so the store drops out rather than
+  arriving late, the River shape again — but implication and observation are different claims.
+- **The two most-quoted numbers have no ordering.** The 0/120 clean baseline at 17:45 on 09-15 and
+  the 23.3% at 07:27 were both sorted before storage, so neither can place a stall in time, and the
+  clean one is **one run on one machine on one network path** — it rules out that instrument at that
+  volume reliably producing stalls; it is not a baseline. Ordering is what distinguishes "a bad
+  patch" from "builds under sustained load", and it was thrown away by sorting. The 09:37 run has it
+  and answers on its own: stalls **flat across the run with the WORST quarter first**, which is the
+  opposite of load building up.
+
+**What this bought Sales:** nothing faster, and v2.602 earning its keep. The coverage readout on the
+mobile hero reports *"5/6 stores"* instead of a confident total over missing data — the simulation
+above is the first demonstration it has something real to report.
+
 ## The Inventory tab's sales speed comes through GX Core — and was a green 0 until v2.596
 
 The Critical tile (products under 3 days on hand) fetched velocity straight from a hardcoded

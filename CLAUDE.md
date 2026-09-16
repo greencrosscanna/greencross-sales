@@ -530,6 +530,44 @@ miss). Mobile and desktop rows share it.
 - Measured on the live backend: a poll set all six blinking at 0s and cleared each as it landed
   (five by 2.9s, Hillsboro at 17.8s). `tests/store_dot_blink_test.js`, verified by mutation.
 
+### …and the HERO says whether the total is whole (v2.600, 2026-09-16)
+
+Sky, 2026-09-16: *"Oh man it's slow again."* Asked which of the four shapes this file documents:
+**most stores land, one or two lag, on a phone.** He could not say which stores — and the app is
+the reason, not his memory.
+
+**`pill()` writes to `#dsk-live-txt` and nothing else.** So `6/6 stores · today pending: River` —
+the one line that says the figure above it is understated — existed on the DESKTOP and **nowhere on
+mobile**, which is the device every 60+sec report in this file has come from. The mobile hero's
+live dot is `background:var(--green)` in the stylesheet and is never touched by JS, so a total short
+a store's today sat under a **confident green light**.
+
+**Nothing was wrong with the numbers, and nothing was slow that v2.592/v2.597 had not already
+addressed.** The phase split paints the settled month and marks the store today-pending exactly as
+designed; the per-store blink above does run on mobile. What was missing is the COMPANY-level
+statement. *Which row is stale* and *is the total whole* are two different questions, and the hero
+figure only ever answered the first. The River shape one level up, and the Inventory tile's green 0
+again: a per-store failure degrading into a smaller number instead of a message.
+
+- **`_heroLiveHtml_` reads the same two facts as `storeNotCurrent_`** (`_storeStateMap`,
+  `_todayPending`) behind the same `viewIncludesToday_()` guard — an August view cannot report a
+  September miss. Two definitions of "not current" would drift within a release.
+- **Amber names the store while one name fits, counts once it does not.** `err` is the stronger
+  statement and outranks today-pending: red with `5/6 stores`, one message rather than two.
+- **A load in flight reports NOTHING.** Every store is `loading` on a cold boot and the hero already
+  shimmers; an amber "short" light over a shimmer answers a question nobody has asked — the same
+  error as the `$0` hero.
+- **Built once, used by all three hero branches.** The three `ic-hero-top` blocks were hand-copied,
+  so the test asserts the **absence of the copied block**, not the presence of a call.
+- `tests/hero_live_state_test.js` — 26 assertions, executes the shipped builder; all seven guards
+  mutation-verified, each target asserted present first so no mutation was vacuous.
+
+**The durable lesson is about DIAGNOSIS, not the dot.** Three "it's slow" reports in five days
+resolved to three different causes, and each cost a round trip to Sky to tell apart. The phone —
+the only device any of them came from — could not say which stores were short. **An app that cannot
+tell you what is wrong with it turns every report into a guess**, and this file's whole method is
+the opposite of guessing.
+
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
 
 Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:
@@ -605,6 +643,22 @@ dropping ~4% of requests, and the only lever this app has is how fast it gives u
 still feel long, re-measure the RATE before re-tuning the ceiling — `python3` firing six parallel
 requests at `/exec` is the whole instrument, and a `loadprobe` walk cannot see this at all, because
 it measures the server's own work and the stall happens outside it.
+
+**That instrument is checked in now — `python3 tools/exec_stall_probe.py` (2026-09-16).** It was a
+throwaway both previous times and was gone when the complaint came back, leaving the next session
+the last session's CONCLUSION where it needed a measurement. It fires six at a time, reports median
+/ p95 / stall rate against the 2026-09-15 baseline, how many requests blew each live ceiling, and
+how often a 16-request load carries a stall. `action=libversion` deliberately: public, no secret,
+trivial work, so the number is the HOP and not the handler. **Verified in both directions** against
+a local server with a deterministic injected rate — every 5th request stalling reported exactly
+20.0%, no stalls reported 0.0%; a probe that always found stalls would have passed the first check
+alone.
+
+**Ruled OUT by measurement on 2026-09-16, so nobody re-measures it: v2.599's `gxScrub_` is not a
+cost anyone can feel.** It IS on the hot path — `getStoreSales_` answers through `jsonOut_` — which
+is why it was worth checking rather than assuming. Executing the shipped function over a real
+store-month reply costs **0.008–0.063ms**; 0.6ms over a 530KB absurd case and 2ms over a
+deliberately credential-dense pathological string.
 
 *One measurement trap worth keeping: a test written `ok(cond, label)` in a file whose `ok` is
 `ok(label, cond)` passes unconditionally — the cross-file wait assertion above shipped that way for

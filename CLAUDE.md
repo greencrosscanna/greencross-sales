@@ -729,6 +729,16 @@ can see.
   choke-point-only fix covers two thirds of the paths and reads as complete. So: **`errText_()` at
   all 37 sites** where an exception becomes part of a reply, **and `gxScrub_` inside `jsonOut_` as a
   backstop**. Before adding a "one place to fix it", count the exits.
+
+  **And do not assume this shape is suite-wide — it is ours alone.** Told core-admin I would bet
+  another spoke had it; core-admin counted all seven rather than guess, and the bet was wrong.
+  Sales has **18 `createTextOutput` and 36 `setContent`**; every other repo has 1-5 and **not a
+  single `setContent` between them** (Core's five are fixed-literal POST errors carrying no
+  exception text, plus its one `out()` choke point). So a choke-point fix genuinely IS complete
+  everywhere else, and this file is the one with 54 doors. The method survives the correction —
+  counting is what tells you which case you are in — but "another app probably has this too" was a
+  guess where a count was available, which is the same error as the serialization theory the same
+  night.
 - **`gxScrub_` makes two passes for two different things.** The exact secret, wherever it appears
   and however it got there — no pattern to outsmart. Then any credential-shaped query parameter,
   for values we do NOT hold: a session token in an echoed URL, a key in a message from GX Core.

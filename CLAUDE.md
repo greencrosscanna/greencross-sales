@@ -708,6 +708,50 @@ naming the bug id and saying explicitly **not** to re-file it.
 a real bug on the board and sending a real email. What was checked live is that the deployed script
 compiles and serves (`libversion` → 315) and that the auth gate still sits above this code.
 
+## Nothing this script returns may carry a credential (v2.599, 2026-09-15)
+
+Reported by SPIFF through core-admin, after SPIFF found the shape in its own router. **Confirmed
+reachable HERE before anything was changed**, which is what the note asked for and is the only
+reason it was worth shipping:
+
+`gxDutchieGet_` builds `GXCORE_EXEC_ + '?…&secret=' + gxDeploySecret_()` and hands it to
+`UrlFetchApp.fetch`. **`muteHttpExceptions: true` suppresses HTTP status errors; it does not
+suppress a transport failure**, and there is no `try` around that call. When Apps Script cannot
+reach the address it throws `Address unavailable: <the whole URL>`, query string and all — which
+escapes to `getStoreSales_`'s catch, becomes `{ error: <that message> }`, and gets painted in the
+store's error slot. **Four outbound fetches carry the secret and all four are reachable this way.**
+Not an outage, and nothing says it has fired; it is one throw from a credential on a screen staff
+can see.
+
+- **TWO LAYERS, AND THE REASON IS THE USEFUL PART.** The obvious fix is a scrub inside `jsonOut_` —
+  every reply goes through it, so no new route can forget. **Except nine of this file's replies are
+  built with `output.setContent(JSON.stringify(…))` and never touch `jsonOut_` at all.** A
+  choke-point-only fix covers two thirds of the paths and reads as complete. So: **`errText_()` at
+  all 37 sites** where an exception becomes part of a reply, **and `gxScrub_` inside `jsonOut_` as a
+  backstop**. Before adding a "one place to fix it", count the exits.
+- **`gxScrub_` makes two passes for two different things.** The exact secret, wherever it appears
+  and however it got there — no pattern to outsmart. Then any credential-shaped query parameter,
+  for values we do NOT hold: a session token in an echoed URL, a key in a message from GX Core.
+- **It can never be the reason a response fails.** `gxDeploySecret_` throws when the property is
+  unset, and a scrub that threw with it would turn a working app into a blank one. Wrapped, falling
+  through to the pattern pass. Leaking is bad; serving nothing is worse.
+- **The length guard is load-bearing.** An empty or two-character property would otherwise redact
+  half of every payload — `'a cab drove by'` becomes `'a [redacted] drove by'`.
+- **`tests/secret_scrub_test.js` (19 assertions) EXECUTES a real handler's catch** — `getVelocity_`,
+  reachable at `?action=velocity` — with a real `Address unavailable` exception, then asserts
+  separately that **no reply field anywhere in the file is handed a raw `.message`**. That second
+  one is written as **the absence of the hazard, never the presence of the fix**: a grep for
+  `errText_` goes green the moment one appears anywhere, which is precisely how SPIFF's own version
+  passed on a router that still leaked. Six mutations, each failing the right assertion; the
+  un-wrapped-call-site mutation prints its line number, and the two layers fail **independently**,
+  so you can tell neither is quietly covering for the other.
+- **The push gate caught this change's own test** — a random-looking literal assigned to `SECRET` —
+  and was right to: it cannot tell a fixture from the real thing and should not have to guess. The
+  fixture is assembled from plain words now.
+
+*GX Core has no scrub helper of its own and its `doGet` catch returns `err.message` raw; that is
+core-admin's item and is PR-gated as a library cut.*
+
 ### The screenshot died one line short of the board (v2.598, 2026-09-15)
 
 Filed by core-admin, measured live: **140 bug reports across all seven apps, not one with a

@@ -3929,6 +3929,18 @@ function reportBug_(params, reporter) {
       appStore: params.appStore || '',
       tab:      ctxTab || params.appTab || '',
       appTab:   params.appTab   || '',
+      /* THE SCREENSHOT TRAVELS AS A URL, AND IT DIED HERE FOR THREE WEEKS. The shared form uploads
+       * the image to GX Core's bug_shot sink itself — a 273KB base64 would not survive this GET —
+       * and sets payload.screenshot_url, which the frontend forwards with the rest of the payload.
+       * This literal then re-packed the payload field by field and never named it, so every Sales
+       * report reached the board with an empty screenshot column: 24 Sales reports, 14 of them
+       * filed since the feature shipped 2026-08-26, zero with an image. Measured by core-admin
+       * 2026-09-15 across all seven apps — 140 reports, none with one.
+       *
+       * Omitting a key from an object literal throws nothing, which is the whole shape of it: the
+       * same way `context` went missing, one line short of the board, silently. A re-pack is a
+       * hand-maintained copy of a contract that lives somewhere else. */
+      screenshot_url: params.screenshot_url || '',
       context:  ctx
     });
     if (!r || !r.ok) return jsonOut_({ ok: false, error: (r && r.error) || 'bug report was not saved' });

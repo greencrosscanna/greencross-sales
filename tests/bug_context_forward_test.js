@@ -167,6 +167,12 @@ console.log('\n── the source itself ──');
   ok('reportBug_ forwards a context field',        /context:\s*ctx/.test(src));
   ok('the parse is guarded by try/catch',          /try\s*\{[^}]*JSON\.parse/.test(src));
   ok('tab is passed to gxIngestBug',               /\btab:\s*ctxTab/.test(src));
+  /* THE SAME GAP, ONE FIELD OVER. The shared form uploads the image to Core's bug_shot sink and
+   * hands this app only the resulting url; the ingest literal re-packs the payload by hand, so a
+   * field it does not name is dropped in silence. That is exactly what happened to screenshot_url
+   * for three weeks — 24 Sales reports on the board, not one with an image. Omitting a key from an
+   * object literal throws nothing, so nothing but this line notices. */
+  ok('reportBug_ forwards the screenshot url',     /screenshot_url:\s*params\.screenshot_url/.test(src));
 }
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

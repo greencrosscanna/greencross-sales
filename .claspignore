@@ -23,3 +23,12 @@ design_handoff_*/**
 # change to this app; it was armed the moment the file landed and would have stopped the next
 # deploy whatever it carried.
 serve.js
+
+# Node/python diagnostics that run on a DEVELOPER's machine, never in Apps Script. Added with
+# tools/exec_stall_probe.py (2026-09-16), which is .py and therefore not pushed by clasp today —
+# this entry is for the next file in here. tests/, design_handoff_*/ and serve.js above are three
+# instances of one mechanism: rootDir is "." and this list excludes nothing by extension, so the
+# first .js anyone drops in a new directory ships as .gs and blocks the entire deploy. Listing the
+# directory when it is created costs one line; finding out the other way costs a deploy.
+tools/
+tools/**

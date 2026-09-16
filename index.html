@@ -1396,7 +1396,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 
      This script touches the DOM only inside jsonp() at call time, so loading it synchronously here
      is safe; Chart.js directly above is already blocking and far larger. -->
-<script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-client.js"></script>
+<script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-client.js" data-app="sales"></script>
 <script>
 // Re-inject tags that GAS strips from <head>
 (function(){
@@ -1418,7 +1418,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.603';
+const APP_VERSION = 'v2.604';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';

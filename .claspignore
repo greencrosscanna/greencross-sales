@@ -7,7 +7,17 @@ tests/**
 !index.html
 **/*.json
 !appsscript.json
+# .claude/ NEEDS ITS /** SIBLING, and for eleven months it did not have one. Every other directory
+# entry in this file is listed twice — tests/ + tests/**, tools/ + tools/**, design_handoff_*/** —
+# because the bare form does not exclude what is NESTED inside. .claude/ was the one exception, and
+# it broke a deploy on 2026-09-16: a leftover preflight worktree at
+# .claude/worktrees/.gxpreflight-*/serve.gs was pushed as Apps Script source, failed to parse, and
+# blocked the ENTIRE deploy — a library re-pin that had nothing to do with it.
+# Fourth instance of the one mechanism this file already explains three times: rootDir is "." and
+# nothing here excludes by extension, so the first unparseable file in a new directory stops
+# everything. The worktrees are live and were not deleted; they simply must not ship.
 .claude/
+.claude/**
 clasp.sh
 # Design handoff folders. Same failure mode as tests/ above: a stray .js in one of these gets pushed
 # as .gs source and can break the whole deploy. Globbed, not named one by one — the period-selector

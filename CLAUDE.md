@@ -708,6 +708,22 @@ naming the bug id and saying explicitly **not** to re-file it.
 a real bug on the board and sending a real email. What was checked live is that the deployed script
 compiles and serves (`libversion` → 315) and that the auth gate still sits above this code.
 
+### The screenshot died one line short of the board (v2.598, 2026-09-15)
+
+Filed by core-admin, measured live: **140 bug reports across all seven apps, not one with a
+screenshot** — 24 of them Sales, 14 filed since the feature shipped 2026-08-26. Every piece worked.
+The shared form uploads the image to GX Core's `bug_shot` sink itself (a 273KB base64 would not
+survive this app's GET) and sets `payload.screenshot_url`; the frontend forwards the whole payload;
+`gxIngestBug` reads the field and writes the column. **`reportBug_` then re-packed the payload into
+a fresh object literal, field by field, and never named it.**
+
+**Omitting a key from an object literal throws nothing** — which is the entire shape of this bug,
+and of the `context` gap before it. A hand-maintained re-pack of a contract that lives somewhere
+else will lose a field every time that contract grows one, silently, and the only thing that can
+notice is a test naming the field. `tests/bug_context_forward_test.js` now pins both, the screenshot
+assertion verified by mutation. The hub carries the cross-repo half
+(`tests/bug_screenshot_forwarding_test.js`).
+
 ### That commit also shipped two NUL bytes, and the interesting part is what it did NOT break
 
 `bugMailOnce_`'s cache-key delimiter was written to disk as the raw byte instead of an escape —

@@ -320,8 +320,27 @@ function harness(live) {
     ok('...and an interim paint for a period the reader has left is dropped',
        /if \(_liveDataKey !== loadKey \|\| liveData\[store\.name\]\) return;/.test(las));
     ok('the retry keeps the early paint', /return fetchMonthData\(store, year, month, true, onSettled\);/.test(las));
-    ok('the live half waits 28s per attempt, and 2 x 28s still fits the 60s poll',
-       /phase === 'live' \? await gasFetchJson\(url, 2, 28000\)/.test(las));
+    /* The two halves get DIFFERENT budgets, and the live one is the more patient of the two —
+     * that is the whole point of splitting them. The numbers themselves are pinned in
+     * background_refresh_test, which reads them off the shipped constants; what matters here is
+     * that the split still reaches the fetch. */
+    ok('the live half is given its own, more patient budget than the settled half',
+       /phase === 'live' \? LIVE_PHASE_CAPS_ : SETTLED_PHASE_CAPS_/.test(las));
+    const capsOf = n => JSON.parse((new RegExp('const ' + n + '\\s*=\\s*(\\[[^\\]]*\\])').exec(HTML) || [])[1] || 'null');
+    const live = capsOf('LIVE_PHASE_CAPS_'), settled = capsOf('SETTLED_PHASE_CAPS_');
+    ok('...and it really is more patient, attempt for attempt',
+       !!live && !!settled && live.every((v, i) => v > settled[i]));
+    /* THE CLIENT'S LAST LIVE ATTEMPT AND THE PROXY'S JOIN WINDOW ARE ONE WAIT, DESCRIBED TWICE.
+     * dtodayAwaitFlight_ holds a second request for up to DTODAY_WAIT_MS_ waiting on the pull
+     * already running; if the browser hangs up first, that whole wait is spent and thrown away and
+     * the store has to ask again. Measured while building this: a 14s final attempt against a 25s
+     * server wait cost Bend fourteen seconds and a third request. These two live in different
+     * files and different languages, which is exactly why nothing but a test can hold them
+     * together. */
+    const wait = Number((/const DTODAY_WAIT_MS_\s*=\s*(\d+)/.exec(GS) || [])[1]);
+    ok('the last live attempt outlasts the proxy\'s join window (' +
+       (live ? live[live.length - 1] : '?') + 'ms vs ' + wait + 'ms)',
+       !!wait && !!live && live[live.length - 1] >= wait);
     ok('a today view shimmers a today-pending row instead of showing $0',
        /pending: !liveData\[s\] \|\| \(!!activeDay && activeDay === laDay\(\) && _todayPending\.has\(s\)\)/.test(HTML));
   }

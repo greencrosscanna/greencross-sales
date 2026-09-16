@@ -1410,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.596';
+const APP_VERSION = 'v2.597';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2224,16 +2224,29 @@ function getProxyUrl() {
  * failure to obtain a parseable body is retried.
  */
 async function gasFetchJson(url, attempts, timeoutMs) {
-  const tries = attempts || 3;
+  /* THE BUDGET MAY BE PER-ATTEMPT — pass an ARRAY and it sets both the ceiling of each attempt and
+   * how many there are (`attempts` is then ignored, so the two can never drift apart).
+   *
+   * One flat ceiling forces a single number to answer two different questions: how long a healthy
+   * call is allowed to take, and how long to wait before concluding this one is never coming back.
+   * Measured 2026-09-15 over 234 requests to this app's own /exec, six at a time the way a load
+   * fires them: p50 3.1s, p90 3.9s, p95 4.1s — and 8 of the 234 (3.4%) stalled 11-60s while their
+   * five siblings answered in three. The stall is Google's /exec front end, not this app and not
+   * the store: 25 of 25 sequential requests to the same route in the same window were clean, and a
+   * retry after a stall answered normally every time. So the healthy band and the broken band do
+   * not overlap at all, and a short FIRST attempt with a longer second costs the healthy case
+   * nothing while cutting the broken one by two thirds. */
+  const caps  = Array.isArray(timeoutMs) ? timeoutMs : null;
+  const tries = caps ? caps.length : (attempts || 3);
   // A BOUNDED wait is the point, not just the retry. A bare fetch to /exec has no timeout, and a
   // bounce loop on that hop has been measured at up to 137 seconds (core-admin, 2026-09-03) — the
   // request never fails, it just never comes back, and there is no retry for a request that has not
   // finished. One store hanging like that while five answer in two seconds is what "five loaded
   // quickly, one is stalling" looks like from the outside. 30s is far above a healthy call (~2-5s)
   // and far below a bounce loop, so it only ever cuts short something already broken.
-  const cap = timeoutMs || 30000;
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
+    const cap = caps ? caps[i] : (timeoutMs || 30000);
     const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ctl ? setTimeout(() => ctl.abort(), cap) : null;
     try {
@@ -2257,6 +2270,61 @@ async function gasFetchJson(url, attempts, timeoutMs) {
   }
   throw lastErr || new Error('request failed');
 }
+
+/* ─── HOW LONG A STORE'S TWO HALVES ARE ALLOWED, ATTEMPT BY ATTEMPT ─────────────────────────────
+ *
+ * Sky, 2026-09-15, on v2.596: "still taking 60+sec to load on mobile" — the same sentence that
+ * produced v2.592, because v2.592 fixed a different cause of it and left this one standing.
+ *
+ * WHAT WAS MEASURED (2026-09-15, this app's live /exec, six requests at a time the way a load
+ * fires them, 234 requests): a healthy call is 3.1s at the median and 4.1s at p95. Eight of the
+ * 234 — 3.4% — took 11s to 60s while the five requests beside them answered in three. Sequentially,
+ * 25 of 25 were clean. So this is not a slow store, a slow month or a busy backend; it is the /exec
+ * hop intermittently failing to come back, and it strikes a request at random. A boot fires about
+ * sixteen of them, so roughly HALF of all loads carry one, and the load is only as fast as its
+ * slowest request.
+ *
+ * WHY THAT READ AS 60 SECONDS. v2.592 gave the live half 28s x 2 because the Dutchie hop genuinely
+ * took 11.7-23.6s that evening, and abandoning a request that was about to succeed cost the store
+ * its whole turn. That reasoning is still correct for a slow HOP. It is exactly wrong for a stall:
+ * a stalled request is never going to answer, and the app now waits 28 seconds to find that out,
+ * twice, before a retry that succeeds in three.
+ *
+ * THE TWO FAILURES WANT OPPOSITE CEILINGS, so they get one each instead of splitting the
+ * difference. Attempt one is short enough to call a stall early; attempt two is long enough for a
+ * genuinely slow hop.
+ *
+ * 12s FOR THE FIRST ATTEMPT, AND THE REASON IS THE EVENING, NOT THE MEDIAN. A midday live half
+ * measured 3.1-7.0s; the same six stores at 18:00 the same day sat right on 10.5s, and on a bad
+ * evening (2026-09-13) 11.7-23.6s. A ceiling set from the healthy median spends its life firing on
+ * ordinary evening traffic. What makes the exact number unimportant is that BEING WRONG IS CHEAP
+ * NOW: the abandoned pull finishes anyway and leaves its answer in the 90s cache, so attempt two
+ * is a ~3s cache read rather than a second pull. Guessing 3 seconds too low costs 3 seconds;
+ * guessing 18 seconds too high — which is what 28s was — cost the whole load. Err short.
+ *
+ * THIS IS ONLY AFFORDABLE BECAUSE THE PROXY REMEMBERS. An abandoned request keeps running on Apps
+ * Script to completion, and dutchieTodayFetch_ caches today's pull for 90s and makes a concurrent
+ * one JOIN it (dtodayAwaitFlight_, up to 25s) rather than repeat it. So attempt two on a slow
+ * evening is not a second pull — it is the first pull's answer, arriving under its own ceiling.
+ * Without that, shortening the first attempt would be the v2.591 regression all over again.
+ *
+ * WHICH IS WHY ATTEMPT TWO IS 25s AND NOT SOMETHING TIDIER: it has to outlast the wait the SERVER
+ * is already honoring on its behalf. DTODAY_WAIT_MS_ is 25s, and a client that hangs up at 14s
+ * abandons a join that was still running — measured on this very change before it shipped, Bend
+ * spent 14 seconds waiting on a pull it then threw away and had to ask a third time. Two numbers
+ * describing one wait have to be the same number; if DTODAY_WAIT_MS_ moves, this moves with it.
+ *
+ * THE SUM STAYS INSIDE ONE 60s POLL, which is the hard constraint: _loadAllStoresInFlight blocks
+ * the very poll that would recover a store (background_refresh_test pins it). 12+25 = 37s of
+ * ceiling plus ~1.2s of backoff ≈ 38s, against 57s before.
+ *
+ * SETTLED IS SHORTER because it is a library read with no /exec hop below it — measured at 10-50ms
+ * of server work, 1.8s when the year cache is cold. There is nothing to join, so its retries are
+ * plain re-asks; anything past 8s there is the same stall. It gets a third attempt where live does
+ * not, because a settled failure does not merely delay the store, it FAILS it (fetchMonthData does
+ * not re-try a timeout) and drops it out of the company total. */
+const LIVE_PHASE_CAPS_    = [12000, 25000];
+const SETTLED_PHASE_CAPS_ = [8000, 12000, 16000];
 
 // Safe HTML escape — prevents raw strings from backend injecting markup.
 function escHtml(s) {
@@ -3277,19 +3345,11 @@ async function loadAllStores() {
     // RETRY. A long in-request chain holds _loadAllStoresInFlight, which blocks the poll that
     // would have fixed it — so failing fast and letting the next poll try again recovers sooner
     // than retrying harder here. Worst case ~31s, comfortably inside one poll interval.
-    /* THE LIVE HALF GETS 28s, NOT 15s. Sky, 2026-09-13, on v2.591: "it took 60+ seconds to load on
-     * mobile." Measured minutes later: the settled half answered in under a second for every store,
-     * and the live half's single GX Core hop took 11.7-23.6s (Portland Rd 50s) — against a 15s
-     * ceiling. So the browser abandoned requests that were about to succeed, the retry started a
-     * second pull on the server, and the store fell through to the next 60s poll. 28s covers the
-     * measured single-hop band; the proxy now makes a retry JOIN a pull already running
-     * (dtodayAwaitFlight_, up to 25s) instead of repeating it, so attempt two lands inside its own
-     * ceiling even when one hop outruns the first. The settled half keeps 15s — it is a library
-     * read, and a slow one is genuinely broken.
-     * 28 and not more: 2 x 28s = 56s stays inside the 60s poll, because _loadAllStoresInFlight
-     * blocks the very poll that would recover a store (background_refresh_test pins it). The
-     * longer hold is also why the month is painted the moment the settled half lands (onSettled). */
-    const data = phase === 'live' ? await gasFetchJson(url, 2, 28000) : await gasFetchJson(url, 2, 15000);
+    /* THREE SHORT ATTEMPTS, NOT TWO LONG ONES — see PHASE_CAPS_ above for the measurement. A
+     * stalled /exec and a slow Dutchie hop want opposite ceilings, and one number cannot serve
+     * both: 28s x 2 is right for the hop and three times too patient for the stall, which is the
+     * one that actually happens on a healthy evening. The escalation gives each its own. */
+    const data = await gasFetchJson(url, null, phase === 'live' ? LIVE_PHASE_CAPS_ : SETTLED_PHASE_CAPS_);
     if (data.error) {
       if (data.error === 'Auth required') { salesLogout(); throw new Error(data.error); }
       throw new Error(data.error);

@@ -235,17 +235,97 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
     eq(calls.length, 2, 'the hung request was abandoned and retried, not waited on');
   }
 
+  /* ── 2b-ii. EACH ATTEMPT GETS ITS OWN CEILING ────────────────────────────────
+   *
+   * Sky, 2026-09-15: "still taking 60+sec to load on mobile." A stalled /exec never answers and a
+   * slow Dutchie hop answers late, and one flat ceiling has to be wrong for one of them — set for
+   * the hop (28s), it let every stall hold the load for 56 seconds. Measured that day: 8 of 234
+   * requests stalled 11-60s while their siblings answered in 3.1s median. So the first attempt is
+   * short and the later ones patient.
+   *
+   * EXECUTED, not read: the assertion is on the DELAY each abort timer is armed with, in order,
+   * which is the only thing that decides when a stalled request is abandoned. */
+  {
+    const delays = [];
+    const calls  = [];
+    const ctx = {
+      console, Math, JSON, Error, Promise, clearTimeout: () => {},
+      setTimeout: (f, ms) => { delays.push(ms); f(); return 1; },
+      AbortController: function () {
+        this.signal = { aborted: false };
+        this.abort = () => { this.signal.aborted = true; };
+      },
+      fetch: (url, opts) => {
+        calls.push(url);
+        return new Promise((_res, rej) => {
+          const s = opts && opts.signal;
+          if (s && s.aborted) return rej(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          const iv = setInterval(() => {
+            if (s && s.aborted) { clearInterval(iv); rej(Object.assign(new Error('aborted'), { name: 'AbortError' })); }
+          }, 1);
+        });
+      },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(grab('gasFetchJson'), ctx);
+
+    try { await ctx.gasFetchJson('https://example.test/exec', null, [10000, 14000, 20000]); } catch (e) {}
+    // Abort timers are armed at attempt start; the backoff timer sits between two of them.
+    const caps = delays.filter((_, i) => i % 2 === 0);
+    eq(calls.length, 3, 'the list sets the attempt count — three ceilings, three attempts');
+    eq(caps.join(','), '10000,14000,20000',
+       'each attempt was abandoned at ITS OWN ceiling, escalating (got ' + caps.join(',') + ')');
+    ok(delays.length === 5 && delays[1] >= 700 && delays[1] <= 1200 && delays[3] >= 1400 && delays[3] <= 1900,
+       'the jittered backoff still sits between attempts (got ' + delays.join(',') + ')');
+
+    // A number still means what it always meant — every existing call site depends on it.
+    delays.length = 0; calls.length = 0;
+    try { await ctx.gasFetchJson('https://example.test/exec', 2, 15000); } catch (e) {}
+    eq(calls.length, 2, 'the plain number form is unchanged: attempts x one flat ceiling');
+    eq(delays.filter((_, i) => i % 2 === 0).join(','), '15000,15000',
+       'and every attempt gets that same ceiling');
+
+    // A first attempt that answers must not pay for the later ceilings.
+    delays.length = 0; calls.length = 0;
+    ctx.fetch = () => { calls.push(1); return Promise.resolve({ ok: true, text: () => Promise.resolve('{"ok":true}') }); };
+    const good = await ctx.gasFetchJson('https://example.test/exec', null, [10000, 14000, 20000]);
+    eq(calls.length, 1, 'a healthy call still costs exactly one request');
+    ok(good && good.ok === true, 'and its body comes back parsed');
+  }
+
   // ── 2c. The per-store load uses it too — that is where the stall was seen ──
   {
     const load = stripComments(grab('loadAllStores'));
-    ok(/gasFetchJson\(url, 2, 15000\)/.test(load),
+    ok(/gasFetchJson\(url, null, phase === 'live' \? LIVE_PHASE_CAPS_ : SETTLED_PHASE_CAPS_\)/.test(load),
        'each store fetch is bounded and retried — one hung store must not shimmer forever');
-    // The budget has to stay inside one poll interval, or the in-flight guard blocks the very
-    // retry that would have recovered the store.
-    const m = /gasFetchJson\(url, (\d+), (\d+)\)/.exec(load);
-    ok(m && Number(m[1]) * Number(m[2]) < 60000,
-       'the whole per-store retry budget fits inside the 60s poll (' +
-       (m ? m[1] + ' x ' + m[2] + 'ms' : 'not found') + ')');
+    /* THE BUDGET IS THE SUM OF THE ATTEMPTS NOW, NOT attempts x ceiling. Read from the shipped
+     * constants rather than re-typed here: the whole point of a per-attempt list is that the count
+     * and the ceilings move together, and a test carrying its own copy of either would go green on
+     * a budget the app no longer has. The constraint is unchanged — the retry chain has to finish
+     * inside one 60s poll, because _loadAllStoresInFlight blocks the poll that would recover the
+     * store. Backoff is counted too: it is wall clock the reader waits through like any other. */
+    const capsOf = name => {
+      const m = new RegExp('const ' + name + '\\s*=\\s*\\[([^\\]]*)\\]').exec(SRC);
+      return m ? m[1].split(',').map(x => Number(x.trim())).filter(n => n > 0) : null;
+    };
+    for (const name of ['LIVE_PHASE_CAPS_', 'SETTLED_PHASE_CAPS_']) {
+      const caps = capsOf(name);
+      ok(caps && caps.length >= 2, name + ' is a list of per-attempt ceilings (' + caps + ')');
+      // 700 + 1400 + … of jittered backoff, plus up to 500ms of jitter each — the worst case.
+      const backoff = caps.slice(1).reduce((a, _, i) => a + 700 * (i + 1) + 500, 0);
+      const total   = caps.reduce((a, b) => a + b, 0) + backoff;
+      ok(total < 60000,
+         name + ': the whole retry chain fits inside the 60s poll (' + total + 'ms)');
+      /* The FIRST attempt is the one that decides how long a stall costs, and the measurement it
+       * is set from (2026-09-15) put a healthy call at 4.1s by p95. Below that it would start
+       * cutting short calls that were going to answer; far above it and a stall is free to hold
+       * the load, which is the bug this replaced. */
+      ok(caps[0] >= 6000 && caps[0] <= 12000,
+         name + ': the first attempt sits above a healthy call and well below a stall (' +
+         caps[0] + 'ms)');
+      ok(caps[caps.length - 1] > caps[0],
+         name + ': later attempts are more patient than the first, not less');
+    }
     ok(!/const res = await fetch\(url\);/.test(load),
        'the unbounded per-store fetch is gone');
     ok(/timed out after/.test(load),

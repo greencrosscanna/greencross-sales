@@ -12,6 +12,17 @@
  *   3. It resumes on its own at 08:00 because the timer keeps ticking. If the fix ever changes to
  *      clearAutoRefresh(), nothing restarts it and the dashboard is dead until a reload.
  *
+ * AMENDED 2026-09-16: the pause now has ONE exception — a tick still fetches when a store is
+ * incomplete, because the pause was outlasting a FAILED load. Measured on Sky's phone at 23:36:
+ * five of six stores timed out on today's half and the poll that recovers them was asleep, so the
+ * dashboard sat dead and would have until 08:00. The exception lives in quiet_recovery_test.js;
+ * what stays HERE is that the pause itself still happens and still resumes on its own.
+ *
+ * The assertion below therefore stopped pinning the gate's exact SPELLING and pins its property
+ * instead — paints the pill and returns, never clears the timer. It failed on the shape change
+ * while property 3 was fully intact, which is a test describing one implementation rather than the
+ * invariant it was written to protect.
+ *
  * Runs the REAL inQuietHours + the REAL tick callback grabbed out of index.html.
  */
 'use strict';
@@ -90,8 +101,14 @@ else {
 }
 
 console.log('\nit resumes by itself — the timer must keep ticking through the night');
+// The quiet branch must END a tick by painting the pill and returning. Bounded to the branch (no
+// intervening `}` closing it) so this cannot be satisfied by a paintQuietPill sitting elsewhere.
 check('the tick RETURNS on a quiet minute, it does not clearAutoRefresh',
-      /inQuietHours\(\)\s*\)\s*\{\s*paintQuietPill\(\);\s*return;/.test(tick ? tick[1] : ''), true);
+      /inQuietHours\(\)\s*\)\s*\{[^}]*paintQuietPill\(\);\s*return;/.test(tick ? tick[1] : ''), true);
+// ...and the recovery exception is genuinely conditional: an unconditional fetch would defeat the
+// pause this whole file exists to protect.
+check('a quiet tick only fetches when something is incomplete',
+      /if\s*\(\s*!\s*quietRecoveryNeeded_\(\)\s*\)/.test(tick ? tick[1] : ''), true);
 check('clearAutoRefresh is never called from inside the tick',
       /clearAutoRefresh/.test(tick ? tick[1] : ''), false);
 

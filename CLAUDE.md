@@ -18,7 +18,7 @@ app key in GX Core is **`sales`**.
 | version | the **`APP_VERSION` constant** in `index.html` (no `?v=` cache-buster — there's no external `.js`) |
 | run | `python3 serve.py` → <http://localhost:3000> |
 | ship | commit → push (Pages) → `./deploy.sh` records the release to `version_history` |
-| tests | `tests/*_test.js` — **20 suites, 611 assertions** (2026-08-30), run by the **pre-push hook** via `gx-preflight.sh`; a failure blocks the push. Also verify live with the `gxpin` / `authprobe` routes below |
+| tests | `tests/*_test.js` — **52 suites, 1,755 assertions** (2026-09-16), run by the **pre-push hook** via `gx-preflight.sh`; a failure blocks the push. Also verify live with the `gxpin` / `authprobe` routes below |
 
 The dev server talks to the **live** backend; `gx-dev.js` blocks writes until armed — which matters more
 here than elsewhere, since this app's writes now run through a fail-closed auth guard. `gx-preflight.sh`
@@ -611,6 +611,70 @@ it measures the server's own work and the stall happens outside it.
 one run and reported PASS against a deliberately broken source. Caught only by mutating it. This is
 the third instance in this repo of a guard that could not fail; the rule is unchanged and it is the
 only thing that catches them.*
+
+## The overnight pause outlasted a FAILED load — five stores shimmered until morning (v2.601, 2026-09-16)
+
+Sky, on an iPhone at 23:36: *"still hasn't loaded on my phone, its been 6 minutes and only Center
+has loaded, theres no activity in the network panel."*
+
+**Three correct behaviors composed into a dead dashboard, and no single one of them is wrong.**
+
+1. Five of six stores lost TODAY's half — `[load] <store> today pending: "timed out after 25000ms"`
+   for River, Hillsboro, Portland Rd, Commercial and Bend. Center is the only store absent from
+   that list, which is precisely the "only Center has loaded" he saw. The settled halves all
+   landed, so every store was in `liveData`, `_loadAllStoresInFlight` was `false` and the poll timer
+   was alive — from the inside, the load had SUCCEEDED.
+2. The landing view is TODAY, so a store with no today figure shimmers. Five shimmering rows.
+3. `inQuietHours()` is true from **22:15**, and the 60s poll that recovers exactly this returns on
+   that gate. It ticked every minute and did nothing. **Until 08:00.**
+
+**No number was ever wrong and nothing threw.** The screen simply stopped being able to fix itself,
+and a shimmer reads as "still working" rather than "abandoned" — the River shape again: a failure
+that degrades into something smaller instead of into a message.
+
+- **The pause skips a tick only when there is nothing INCOMPLETE to recover.** It was never wrong
+  about closed stores; it was wrong about assuming the data had arrived. `quietRecoveryNeeded_()`.
+- **"Incomplete" is `storeNotCurrent_`, never a second definition.** That predicate already decides
+  whether a store's dot blinks, so a row blinking *not current yet* while the poll has
+  independently concluded all is well is the two-lists bug wearing a new hat. One definition means
+  a store that LOOKS unfinished is by construction one the poll will go and finish. Mutation 5 in
+  the test is the evidence that the delegation is load-bearing and not stylistic.
+- **CAPPED at 10 attempts** (`QUIET_RECOVERY_MAX_`). "Retry while incomplete" alone is ~480 ticks x
+  6 stores before dawn if a store is genuinely unreachable. A transient `/exec` flake clears on the
+  next attempt or the one after; ten minutes of failing says it is not transient. After the cap the
+  pill goes back to saying paused. **The allowance resets the moment a load comes back complete,
+  and again on leaving quiet hours**, so a later failure gets a fresh one.
+- **Refresh was never gated and still is not.** That is why tapping the live pill fixed it every
+  time, and it is the workaround while a tab is stuck on an older build.
+- **The three gates ABOVE the quiet check are untouched** — in-flight, hidden tab, historical day.
+  The hidden-tab one matters when verifying: the browser pane counts as hidden, so the tick will
+  not fire there at all.
+
+**REPRODUCED INDEPENDENTLY while verifying, which is the part worth keeping.** A local load against
+the live backend at 00:04 finished with Commercial `err` and River / Portland Rd / Hillsboro
+today-pending — four of six incomplete, inside quiet hours, `quietRecoveryNeeded_()` true. On the
+old code that is a dashboard dead until 08:00, on my machine, without trying to cause it. One
+recovery pass then took Commercial to `ok` and cleared River and Hillsboro, leaving two pending and
+the predicate still true — so the next tick continues. Incremental, self-limiting, exactly as
+designed.
+
+`tests/quiet_recovery_test.js` — 32 assertions, EXECUTES the shipped tick and the shipped
+`quietRecoveryNeeded_` / `storeNotCurrent_`. **Six mutations, counts measured not predicted**;
+reverting the gate to the shipped bug fails 10 assertions **while the pause's own section still
+passes**, which is the assertion that proves the fix did not simply delete the thing it had to
+preserve.
+
+**`tests/quiet_hours_test.js` had to be amended, and the reason generalizes.** One assertion pinned
+the gate's exact SPELLING (`if (inQuietHours()) { paintQuietPill(); return;`) rather than the
+property it was written to protect — that a quiet tick returns and never calls `clearAutoRefresh`.
+That property was fully intact and the assertion failed anyway. It now matches the branch rather
+than the line, plus a new one requiring the recovery to stay CONDITIONAL, since an unconditional
+fetch would defeat the pause that file exists to defend. Both mutation-verified.
+
+**What this does NOT fix:** the phone's failure RATE. One load that night carried a 12s timeout,
+five 25s timeouts, a 20s timeout and two of the documented second-hop 404s — far above the ~4% this
+app was tuned for, and still unexplained. This makes a bad load survivable; it does not make it
+rarer. Re-measure the rate with `tools/exec_stall_probe.py` before tuning any ceiling.
 
 ## The Inventory tab's sales speed comes through GX Core — and was a green 0 until v2.596
 

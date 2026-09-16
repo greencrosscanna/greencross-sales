@@ -1410,7 +1410,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.600';
+const APP_VERSION = 'v2.601';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2951,6 +2951,38 @@ function paintQuietPill() {
   pill('muted', `Paused overnight \u00b7 resumes ${when}`);
 }
 
+/* THE OVERNIGHT PAUSE ASSUMED THE DATA HAD LOADED. On 2026-09-15 it had not.
+ *
+ * MEASURED on Sky's phone at 23:36, console open: five of six stores logged
+ * `today pending: timed out after 25000ms` \u2014 River, Hillsboro, Portland Rd, Commercial, Bend \u2014 and
+ * Center did not. That is exactly the "only Center has loaded" he reported. The settled halves had
+ * all landed, so every store sat in liveData and nothing looked broken from the inside; but the
+ * landing view is TODAY, so five rows shimmered with nothing behind them.
+ *
+ * The 60-second poll that exists to recover precisely that is asleep from 22:15 to 08:00. It ticked
+ * every minute, hit the quiet gate, and returned. Six minutes of dead dashboard over an empty
+ * network panel \u2014 and it would have stayed that way until morning.
+ *
+ * The pause is still right for what it was written for: re-fetching closed stores all night buys
+ * nothing. It was only ever wrong about the case where there is something BROKEN to recover. So the
+ * gate now asks whether anything is actually incomplete and skips the tick only when nothing is.
+ *
+ * REUSES storeNotCurrent_ \u2014 never a second definition of "incomplete". That predicate already
+ * decides whether a store's dot blinks, and a row blinking "not current yet" while the poll has
+ * independently concluded everything is fine is the two-lists bug wearing a new hat. One definition,
+ * so a store that LOOKS unfinished is by construction one the poll will go and finish.
+ *
+ * CAPPED, because "retry while incomplete" on its own is 480 ticks x 6 stores before dawn if a store
+ * is genuinely unreachable. A transient /exec flake clears on the next attempt or the one after; ten
+ * minutes of failing says it is not transient, and hammering it until 08:00 will not change that.
+ * After the cap the pill goes back to saying paused \u2014 and Refresh, which this gate has never
+ * blocked, is still right there. */
+const QUIET_RECOVERY_MAX_ = 10;
+let _quietRecoveryTries = 0;
+function quietRecoveryNeeded_() {
+  return STORES.some(s => storeNotCurrent_(s.name));
+}
+
 function scheduleAutoRefresh() {
   clearAutoRefresh();
   // Only auto-refresh on the current month — historical views are static
@@ -2962,7 +2994,14 @@ function scheduleAutoRefresh() {
     // "Live" pill while polling nothing — pace only moved when a tab switch happened to refresh it.
     if (_loadAllStoresInFlight || document.hidden) return;
     if (activeDay && activeDay !== toDateStr(new Date())) return; // historical days stay static
-    if (inQuietHours()) { paintQuietPill(); return; }             // stores are shut — see above
+    if (inQuietHours()) {                                         // stores are shut — see above
+      // Skip the tick only when there is nothing left to recover; see quietRecoveryNeeded_.
+      if (!quietRecoveryNeeded_()) { _quietRecoveryTries = 0; paintQuietPill(); return; }
+      if (_quietRecoveryTries >= QUIET_RECOVERY_MAX_) { paintQuietPill(); return; }
+      _quietRecoveryTries++;
+    } else {
+      _quietRecoveryTries = 0;   // a new evening starts with a full allowance
+    }
     refreshLiveData();
   }, AUTO_REFRESH_MS);
 }

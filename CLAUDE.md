@@ -18,7 +18,7 @@ app key in GX Core is **`sales`**.
 | version | the **`APP_VERSION` constant** in `index.html` (no `?v=` cache-buster — there's no external `.js`) |
 | run | `python3 serve.py` → <http://localhost:3000> |
 | ship | commit → push (Pages) → `./deploy.sh` records the release to `version_history` |
-| tests | `tests/*_test.js` — **20 suites, 611 assertions** (2026-08-30), run by the **pre-push hook** via `gx-preflight.sh`; a failure blocks the push. Also verify live with the `gxpin` / `authprobe` routes below |
+| tests | `tests/*_test.js` — **52 suites, 1,755 assertions** (2026-09-16), run by the **pre-push hook** via `gx-preflight.sh`; a failure blocks the push. Also verify live with the `gxpin` / `authprobe` routes below |
 
 The dev server talks to the **live** backend; `gx-dev.js` blocks writes until armed — which matters more
 here than elsewhere, since this app's writes now run through a fail-closed auth guard. `gx-preflight.sh`
@@ -666,6 +666,70 @@ one run and reported PASS against a deliberately broken source. Caught only by m
 the third instance in this repo of a guard that could not fail; the rule is unchanged and it is the
 only thing that catches them.*
 
+## The overnight pause outlasted a FAILED load — five stores shimmered until morning (v2.601, 2026-09-16)
+
+Sky, on an iPhone at 23:36: *"still hasn't loaded on my phone, its been 6 minutes and only Center
+has loaded, theres no activity in the network panel."*
+
+**Three correct behaviors composed into a dead dashboard, and no single one of them is wrong.**
+
+1. Five of six stores lost TODAY's half — `[load] <store> today pending: "timed out after 25000ms"`
+   for River, Hillsboro, Portland Rd, Commercial and Bend. Center is the only store absent from
+   that list, which is precisely the "only Center has loaded" he saw. The settled halves all
+   landed, so every store was in `liveData`, `_loadAllStoresInFlight` was `false` and the poll timer
+   was alive — from the inside, the load had SUCCEEDED.
+2. The landing view is TODAY, so a store with no today figure shimmers. Five shimmering rows.
+3. `inQuietHours()` is true from **22:15**, and the 60s poll that recovers exactly this returns on
+   that gate. It ticked every minute and did nothing. **Until 08:00.**
+
+**No number was ever wrong and nothing threw.** The screen simply stopped being able to fix itself,
+and a shimmer reads as "still working" rather than "abandoned" — the River shape again: a failure
+that degrades into something smaller instead of into a message.
+
+- **The pause skips a tick only when there is nothing INCOMPLETE to recover.** It was never wrong
+  about closed stores; it was wrong about assuming the data had arrived. `quietRecoveryNeeded_()`.
+- **"Incomplete" is `storeNotCurrent_`, never a second definition.** That predicate already decides
+  whether a store's dot blinks, so a row blinking *not current yet* while the poll has
+  independently concluded all is well is the two-lists bug wearing a new hat. One definition means
+  a store that LOOKS unfinished is by construction one the poll will go and finish. Mutation 5 in
+  the test is the evidence that the delegation is load-bearing and not stylistic.
+- **CAPPED at 10 attempts** (`QUIET_RECOVERY_MAX_`). "Retry while incomplete" alone is ~480 ticks x
+  6 stores before dawn if a store is genuinely unreachable. A transient `/exec` flake clears on the
+  next attempt or the one after; ten minutes of failing says it is not transient. After the cap the
+  pill goes back to saying paused. **The allowance resets the moment a load comes back complete,
+  and again on leaving quiet hours**, so a later failure gets a fresh one.
+- **Refresh was never gated and still is not.** That is why tapping the live pill fixed it every
+  time, and it is the workaround while a tab is stuck on an older build.
+- **The three gates ABOVE the quiet check are untouched** — in-flight, hidden tab, historical day.
+  The hidden-tab one matters when verifying: the browser pane counts as hidden, so the tick will
+  not fire there at all.
+
+**REPRODUCED INDEPENDENTLY while verifying, which is the part worth keeping.** A local load against
+the live backend at 00:04 finished with Commercial `err` and River / Portland Rd / Hillsboro
+today-pending — four of six incomplete, inside quiet hours, `quietRecoveryNeeded_()` true. On the
+old code that is a dashboard dead until 08:00, on my machine, without trying to cause it. One
+recovery pass then took Commercial to `ok` and cleared River and Hillsboro, leaving two pending and
+the predicate still true — so the next tick continues. Incremental, self-limiting, exactly as
+designed.
+
+`tests/quiet_recovery_test.js` — 32 assertions, EXECUTES the shipped tick and the shipped
+`quietRecoveryNeeded_` / `storeNotCurrent_`. **Six mutations, counts measured not predicted**;
+reverting the gate to the shipped bug fails 10 assertions **while the pause's own section still
+passes**, which is the assertion that proves the fix did not simply delete the thing it had to
+preserve.
+
+**`tests/quiet_hours_test.js` had to be amended, and the reason generalizes.** One assertion pinned
+the gate's exact SPELLING (`if (inQuietHours()) { paintQuietPill(); return;`) rather than the
+property it was written to protect — that a quiet tick returns and never calls `clearAutoRefresh`.
+That property was fully intact and the assertion failed anyway. It now matches the branch rather
+than the line, plus a new one requiring the recovery to stay CONDITIONAL, since an unconditional
+fetch would defeat the pause that file exists to defend. Both mutation-verified.
+
+**What this does NOT fix:** the phone's failure RATE. One load that night carried a 12s timeout,
+five 25s timeouts, a 20s timeout and two of the documented second-hop 404s — far above the ~4% this
+app was tuned for, and still unexplained. This makes a bad load survivable; it does not make it
+rarer. Re-measure the rate with `tools/exec_stall_probe.py` before tuning any ceiling.
+
 ## The Inventory tab's sales speed comes through GX Core — and was a green 0 until v2.596
 
 The Critical tile (products under 3 days on hand) fetched velocity straight from a hardcoded
@@ -872,6 +936,60 @@ Every one came from **counting the exits, comparing against something outside th
 it.** Re-reading is what produced all five; it is the activity that feels like verification and
 is not. *Two of the five were in fixes that had shipped the same day and looked complete —
 including the one directly above this section.*
+
+### ONE list now: the names the auth check accepts ARE the names the scrub redacts (v2.600)
+
+The two fixes above were both right and both incomplete, for the same reason, and the third one
+stops the reason rather than the symptom. **The accepted parameter names and the redacted ones were
+two hand-typed lists in two functions that had to agree, with nothing comparing them.** Core-admin
+measured all four of the suite's scrubs on 2026-09-16 and three of them had drifted the same way.
+Adding the missing words — which is what v2.599's follow-up did — closes today's gap and leaves the
+mechanism that made it.
+
+- **`AUTH_PARAM_NAMES_` is the one list.** `authParamValue_` reads a session off a request through
+  it (`requireAuth_` no longer touches `params.token` at all), and `SECRET_PARAM_RE_` is BUILT from
+  it via `SECRET_WORD_NAMES_.concat(AUTH_PARAM_NAMES_)`. A fourth way to present a session is
+  redacted the moment it is accepted, with no second edit to remember. Verified by mutation: adding
+  `sid` to the array made the test exercise `sid=` and pass with **no edit to the test file**.
+- **The real remaining leak was the ANCHORING, and it was live.** The shipped pattern required the
+  credential word to sit immediately after a `?` or `&`, so an underscore in front of it walked
+  straight past. **Measured against this app's live `/exec` before anything was changed**, echoing a
+  fixture value back through the `Unknown store:` reply with a read-only dev session:
+  `token`/`session`/`auth`/`secret`/`password`/`pwd` redacted; **`connector_secret`, `deploy_secret`,
+  `api_key`, `apikey`, `refresh_token`, `x_auth` and `sessionid` came back in full.** That is not
+  hypothetical: **GX Core builds a URL with `?connector_secret=`**, and `gxDutchieGet_` re-throws
+  Core's error text verbatim. The name now matches anywhere inside the parameter name, so there is
+  no third list of prefixes to keep current. The cost is an occasional false redaction (`?keyword=`
+  contains `key`) — one word in a message that was already an error, against a credential on screen.
+- **Every reply exit scrubs, not every catch.** Re-counted: **54 reply-building exits** — 18
+  `ContentService.createTextOutput` and 36 hand-built bodies — against 138 `jsonOut_` call sites
+  that all funnel into one of those 18. Each hand-built body now goes through **`setReply_`**, which
+  scrubs; `getStoresMeta_`'s two direct `createTextOutput(body)` returns were the other two doors and
+  are wrapped. **Cached bodies are scrubbed too** — a scrub that skipped the cache leaks on the
+  second request and not the first, which is the worst possible reproduction case. Cost measured at
+  **0.2ms on a 981KB payload**, byte-identical out.
+- **The test may not take its facts from the thing it is checking.** `tests/secret_scrub_test.js` is
+  **64 assertions** now. §7 derives the names from the source; §7's **floor** and all of §8 are
+  **hardcoded** and unreachable from the implementation, so a REMOVAL fails loudly instead of
+  quietly shrinking the test. That trap is not theoretical — core-admin's first version of this
+  passed 23 of 23 with `session` deleted from the source, and Price Cards' passed 62 of 62.
+- **Mutation-verified in seven directions**, each failing the right assertion: `session` deleted from
+  the list → 5 fail **including the floor**; `sid` added → 66 pass, the new name testing itself; the
+  regex typed by hand instead of built → 11 fail; the anchoring reverted to the shipped pattern → 15
+  fail, exactly the names measured leaking live; one reply exit of 54 un-wrapped → 1 fail **naming
+  the line**; the cached stores payload un-wrapped → 1 fail naming the line; `requireAuth_` reading
+  `params.<name>` again → 1 fail.
+- **A red line has to be actionable.** The section-6 and section-9 source checks used to strip
+  comments by deleting them, which reported a line number ~350 short of the real one in a 6,000-line
+  file. Comments are now blanked with their newlines KEPT, so the number printed is the number in
+  `dutchie_proxy.gs` — confirmed against both mutations.
+- **Five other suites execute `gxScrub_` as a dependency** and now load `AUTH_PARAM_NAMES_` out of
+  the source alongside it (`SCRUB_DECLS`). None of them retypes the names; a copy in a test file is
+  a third hand-maintained list.
+- **This one DID bump `APP_VERSION`** (v2.599 → v2.600) even though `index.html` is otherwise
+  untouched, unlike the 2026-09-15 follow-up that shipped as a bare commit. A backend-only ship with
+  no number is a release nobody can name afterwards — that note had to cite a sha and explain where
+  to read it. The cost is one reload of open tabs.
 
 ### The screenshot died one line short of the board (v2.598, 2026-09-15)
 

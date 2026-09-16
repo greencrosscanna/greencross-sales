@@ -40,6 +40,17 @@ function grab(name) {
   throw new Error('unbalanced ' + name);
 }
 
+/* Comments are stripped BUT THEIR LINES ARE KEPT — every comment character becomes nothing and every
+ * newline survives — so a line number this file prints is the line number in dutchie_proxy.gs. The
+ * earlier version collapsed the comments away and reported a number ~350 lines short of the real
+ * one: a red line nobody can act on, which is the same defect as the push gate that says only
+ * "Binary file matches". Stripping at all is necessary because this repo's prose quotes the hazard,
+ * and a gate its own documentation can trip is a gate nobody keeps. */
+function stripComments(src) {
+  const blank = t => t.replace(/[^\n]/g, '');
+  return src.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/^[ \t]*\/\/.*$/gm, '');
+}
+
 /* Assembled rather than written out. gx-preflight.sh refuses a tracked file that assigns a
  * random-looking literal to a name like SECRET — correctly, since it cannot tell a fixture from the
  * real thing and should not have to guess. It caught this file on its first push. Building the
@@ -48,11 +59,27 @@ const SECRET = ['deploy', 'fixture', 'not', 'a', 'real', 'credential', '0000'].j
 const LEAKY  = 'Address unavailable: https://script.google.com/macros/s/AKfycbx9/exec'
              + '?action=dutchie_get&store=River%20Rd&path=%2Freporting%2Ftransactions&secret=' + SECRET;
 
+/* The three declarations the scrub is BUILT from, lifted out of the shipped source rather than
+   retyped here — retyping them is the drift this whole change exists to end. If one of them is
+   renamed this throws by name instead of silently testing a regex the app does not use. */
+function decls() {
+  const want = [
+    /const AUTH_PARAM_NAMES_\s*=\s*\[[^\]]*\];/,
+    /const SECRET_WORD_NAMES_\s*=[^\n]*\n?[^\n]*?;/,
+    /const SECRET_PARAM_RE_\s*=\s*new RegExp\([\s\S]*?'gi'\);/,
+  ];
+  return want.map(re => {
+    const m = re.exec(GS);
+    if (!m) throw new Error('could not find declaration matching ' + re);
+    return m[0];
+  }).join('\n');
+}
+
 function scrubCtx(secret) {
   const ctx = { PropertiesService: { getScriptProperties: () => ({ getProperty: () => secret }) } };
   vm.createContext(ctx);
-  vm.runInContext('var _GX_SECRET_MEMO_ = null;\n' + grab('gxScrub_') + '\n' + grab('errText_')
-                  + '\n' + grab('jsonOut_'), ctx);
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;\n' + decls() + '\n' + grab('gxScrub_') + '\n'
+                  + grab('errText_') + '\n' + grab('jsonOut_'), ctx);
   ctx.ContentService = { MimeType: { JSON: 'json' },
     createTextOutput: t => ({ _t: t, setMimeType() { return this; } }) };
   return ctx;
@@ -118,7 +145,7 @@ console.log('\n5. EXECUTED: a real handler\'s catch, with the real exception');
     PropertiesService: { getScriptProperties: () => ({ getProperty: () => SECRET }) },
   };
   vm.createContext(ctx);
-  vm.runInContext('var _GX_SECRET_MEMO_ = null;\n' + grab('gxScrub_') + '\n' + grab('errText_')
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;\n' + decls() + '\n' + grab('gxScrub_') + '\n' + grab('errText_')
     + '\n' + grab('hasOwn_') + '\n' + /const VELOCITY_CACHE_KEY_ = [^\n]*/.exec(GS)[0]
     + '\n' + grab('getVelocity_') + '\nthis.getVelocity_ = getVelocity_;', ctx);
   const r = ctx.getVelocity_({});
@@ -130,9 +157,7 @@ console.log('\n5. EXECUTED: a real handler\'s catch, with the real exception');
 
 console.log('\n6. NO SITE WAS MISSED — the part execution cannot prove');
 {
-  /* Strip comments first: this file's own explanatory prose quotes the hazard, and a gate that its
-   * own documentation can trip is a gate nobody will keep. */
-  const code = GS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const code = stripComments(GS);
   /* Every place an exception's text becomes part of a REPLY. Listed as the hazard, not as the fix:
    * a search for `errText_` would go green the moment one appears anywhere in the file, which is
    * precisely how SPIFF's version passed on a router that still leaked. */
@@ -147,12 +172,13 @@ console.log('\n6. NO SITE WAS MISSED — the part execution cannot prove');
   // The stack is worse than the message and must never appear in a reply at all.
   ok('no reply carries a stack trace', !/\bstack\s*:\s*[^,;}\n]*\.stack\b/.test(code));
 
-  /* nine of this file's replies are built with output.setContent(JSON.stringify(...)) and never
-   * reach jsonOut_, which is why the fix could not live in jsonOut_ alone. Prove those paths are
-   * still counted by the check above rather than assumed. */
-  const setContentErr = (code.match(/setContent\(JSON\.stringify\(\{[^}]*\berror\b/g) || []).length;
-  ok('the setContent replies that carry an error are real and still in scope ('
-     + setContentErr + ' of them)', setContentErr >= 6);
+  /* Thirty-six of this file's replies are built by hand and never reach jsonOut_, which is why the
+   * fix could not live in jsonOut_ alone. Prove those paths are still counted by the check above
+   * rather than assumed. (They now route through setReply_ — see §9 — but this counts them by the
+   * ERROR they carry, so the assertion survives the next refactor of how a body is set.) */
+  const handBuiltErr = (code.match(/setReply_\(output,\s*JSON\.stringify\(\{[^}]*\berror\b/g) || []).length;
+  ok('the hand-built replies that carry an error are real and still in scope ('
+     + handBuiltErr + ' of them)', handBuiltErr >= 6);
 
   // The two layers both exist and are wired, not merely defined.
   ok('jsonOut_ scrubs the finished body as a backstop',
@@ -161,37 +187,51 @@ console.log('\n6. NO SITE WAS MISSED — the part execution cannot prove');
      /function errText_[\s\S]{0,200}?gxScrub_\(/.test(code));
 }
 
-console.log('\n7. EVERY WAY TO PRESENT A SESSION IS SCRUBBED — the list DERIVED, not typed');
+console.log('\n7. ONE LIST: the names the auth check accepts ARE the names the scrub redacts');
 {
-  /* THE DEFECT THIS PINS was never the regex. The scrub named `token`; `requireAuth_` accepts
-   * `params.token || params.session || params.auth`. Two hand-typed lists in two functions that had
-   * to agree, with nothing comparing them — so a request presenting its session as `session=` or
-   * `auth=` put a LIVE USER TOKEN in the error banner the scrub exists to clean. Shipped in the
-   * same change that added the scrub, found hours later by core-admin (Leaderboard found it in
-   * itself first), reproduced here by execution before it was believed.
+  /* THE DEFECT THIS PINS was never a missing word in a regex. The scrub named `token`; the auth
+   * check accepted `params.token || params.session || params.auth`. TWO hand-typed lists in two
+   * functions that had to agree, with nothing comparing them — so a request presenting its session
+   * as `session=` or `auth=` put a LIVE USER TOKEN in the error banner the scrub exists to clean.
+   * Adding the two words closed that gap and left the mechanism; core-admin measured the same shape
+   * in three of the suite's four scrubs the next night and asked for the structural fix instead.
    *
-   * SO THE NAMES COME OUT OF THE SOURCE. Pin the LINE, not the spelling: find the call that
-   * validates a session, take its ARGUMENT EXPRESSION, and read every `params.<name>` out of it. A
-   * fourth way to present a session added to that line joins this list on its own and fails here
-   * until the regex learns it. Hand-typing ['token','session','auth'] here would rebuild the exact
-   * drift being fixed — one list agreeing with another by luck. */
-  const auth = grab('requireAuth_');
-  const call = /validateSessionToken_\(([\s\S]*?)\)\s*;/.exec(auth);
-  ok('requireAuth_ still validates through validateSessionToken_ (if this moved, fix the derivation)',
-     !!call);
-  const names = call ? [...call[1].matchAll(/params\.(\w+)/g)].map(m => m[1]) : [];
+   * So there is ONE list now. AUTH_PARAM_NAMES_ is read by authParamValue_ (the auth path) and
+   * concatenated into SECRET_PARAM_RE_ (the scrub). This section reads that array out of the
+   * source, checks that BOTH consumers really are wired to it, and then EXECUTES the shipped scrub
+   * against every name in it. Adding a fourth way to present a session is protected with no edit
+   * here and no edit to the regex. Hand-typing ['token','session','auth'] below would rebuild the
+   * exact drift this replaced. */
+  const decl = /const AUTH_PARAM_NAMES_\s*=\s*\[([^\]]*)\]/.exec(GS);
+  ok('the one list exists and is a literal array (if this moved, fix the derivation)', !!decl);
+  const names = decl ? [...decl[1].matchAll(/'(\w+)'/g)].map(m => m[1]) : [];
   ok('derived the accepted parameter names from the source: ' + (names.join(', ') || '(none)'),
      names.length > 0);
 
-  /* A FLOOR, AND IT IS NOT THE TYPED LIST COMING BACK. Deriving makes ADDITIONS automatic; it is
-   * blind in the other direction. Delete `session` from the auth line and it leaves this list too,
-   * so the suite goes green on a narrower app — the one change a purely derived test cannot object
-   * to. The floor makes a DELETION fail loudly and require a human to agree to it here, which is a
-   * decision point rather than drift. The distinction that matters: the derived list is what the
-   * test EXERCISES, the floor is only what it refuses to shrink below. */
+  /* BOTH CONSUMERS, checked as the absence of the old shape rather than the presence of the new
+   * one. A test that only proves the list exists goes green on a file that keeps a second copy
+   * beside it, which is the bug. */
+  const auth = grab('requireAuth_');
+  ok('the auth check takes the session through the list, not through params.<name>',
+     /authParamValue_\(params\)/.test(auth) && !/params\.(token|session|auth)/.test(auth));
+  ok('authParamValue_ reads AUTH_PARAM_NAMES_ and nothing else',
+     /AUTH_PARAM_NAMES_/.test(grab('authParamValue_')));
+  const reDecl = /const SECRET_PARAM_RE_[\s\S]{0,400}?'gi'\);/.exec(GS);
+  ok('the scrub regex is BUILT from the same array, not typed beside it',
+     !!reDecl && /SECRET_WORD_NAMES_/.test(reDecl[0])
+     && /const SECRET_WORD_NAMES_[^\n]*concat\(AUTH_PARAM_NAMES_\)/.test(GS));
+  ok('gxScrub_ uses that built regex rather than a literal of its own',
+     /return out\.replace\(SECRET_PARAM_RE_/.test(grab('gxScrub_')));
+
+  /* A DERIVED LIST IS BLIND DOWNWARD, SO THERE IS ALSO A FLOOR — hardcoded here, unreachable from
+   * the source. Deriving makes additions automatic and deletions INVISIBLE: delete `session` from
+   * the array and it leaves this test's list with it, so a narrowed app goes green while checking
+   * one name fewer. That is not hypothetical — it is how core-admin's first version of this passed
+   * 23 of 23 and Price Cards' 62 of 62 on the very bug they were written for. The floor is not the
+   * typed list coming back: it never sources what gets EXERCISED, it only refuses shrinkage. */
   for (const known of ['token', 'session', 'auth']) {
-    ok('`' + known + '` is still an accepted way to present a session — if this fails on purpose, '
-       + 'delete it here deliberately', names.indexOf(known) !== -1);
+    ok('FLOOR: `' + known + '` is still an accepted way to present a session — if this fails on '
+       + 'purpose, delete it here deliberately', names.indexOf(known) !== -1);
   }
 
   /* EXECUTED, not read. Each name goes through the shipped gxScrub_ inside a real
@@ -224,6 +264,87 @@ console.log('\n7. EVERY WAY TO PRESENT A SESSION IS SCRUBBED — the list DERIVE
   const loose = ctx.errText_(new Error('session ' + LIVE + ' expired'));
   ok('KNOWN LIMIT (documented, not a bug): a BARE token outside a query string is not matched',
      loose.indexOf(LIVE) !== -1);
+}
+
+console.log('\n8. ANCHORING: a PREFIXED credential parameter does not walk past the scrub');
+{
+  /* MEASURED ON THE LIVE DEPLOYMENT on 2026-09-15, before this was changed, by echoing a fixture
+   * value back through the `Unknown store:` reply: connector_secret, deploy_secret, api_key,
+   * apikey, refresh_token, x_auth and sessionid ALL came back in full, because the shipped pattern
+   * anchored the credential word immediately after `?` or `&` and an underscore in front of it was
+   * enough to walk past. `connector_secret=` is a name GX CORE really builds, and this file
+   * re-throws Core's error text verbatim, so it is a reachable path and not a hypothetical.
+   *
+   * Every name below is HARDCODED — the whole point of this section is to hold names the
+   * implementation's own arrays do not contain, so the test cannot shrink when the source does. */
+  const c = scrubCtx('');   // no deploy secret: the pattern pass alone must carry this
+  const FIX = ['probe', 'fixture', 'value', 'not', 'real', '0000'].join('-');
+  const CASES = [
+    'connector_secret', 'deploy_secret', 'client_secret', 'refresh_token', 'access_token',
+    'api_key', 'apikey', 'x_auth', 'sessionid', 'session_token', 'gc_session', 'user-password',
+    'secret', 'token', 'session', 'auth', 'key', 'password', 'pwd',
+  ];
+  for (const n of CASES) {
+    const out = c.errText_(new Error('Address unavailable: https://x/exec?action=y&' + n + '=' + FIX));
+    ok('`' + n + '=` is redacted', out.indexOf(FIX) === -1);
+  }
+  // First parameter position too — after `?`, not only after `&`.
+  ok('a prefixed name in the FIRST position is redacted as well',
+     c.errText_(new Error('https://x/exec?connector_secret=' + FIX)).indexOf(FIX) === -1);
+  // ...and the message is still a message.
+  const keep = c.errText_(new Error('Address unavailable: https://x/exec?action=stores&store=Bend'));
+  ok('non-credential parameters beside it are untouched', /action=stores&store=Bend/.test(keep));
+}
+
+console.log('\n9. NO REPLY EXIT MAY CARRY A RAW BODY — all 54 of them, not the catches');
+{
+  const code = stripComments(GS);
+
+  /* COUNT THE EXITS BEFORE TRUSTING A CHOKE POINT. jsonOut_ looks like one, and 138 call sites do
+   * go through it — but this file also builds replies by hand, and those never touched the scrub.
+   * Recounted here on every run so the number in the source comment cannot rot. */
+  const ctoLines = [...code.matchAll(/ContentService\.createTextOutput\(/g)]
+    .map(m => code.slice(0, m.index).split('\n').length);
+  const replyLines = [...code.matchAll(/setReply_\(output,/g)]
+    .map(m => code.slice(0, m.index).split('\n').length);
+  console.log('     (reply-building exits: ' + ctoLines.length + ' createTextOutput + '
+              + replyLines.length + ' hand-built = ' + (ctoLines.length + replyLines.length) + ')');
+  ok('this file still has many more exits than choke points — ' + (ctoLines.length + replyLines.length)
+     + ' of them', ctoLines.length + replyLines.length >= 40);
+
+  /* THE HAZARD, NAMED AS AN ABSENCE. A grep for `setReply_` would go green the moment one appeared
+   * anywhere. A grep for `.setContent(` outside the one helper cannot: every hand-built reply in
+   * this file has to route through it, and a new one that does not FAILS HERE WITH ITS LINE. */
+  const raw = [...code.matchAll(/\.setContent\(/g)]
+    .map(m => code.slice(0, m.index).split('\n').length)
+    .filter(ln => !/function setReply_/.test(code.split('\n').slice(Math.max(0, ln - 4), ln).join('\n')));
+  ok('no reply sets its body without the scrub'
+     + (raw.length ? ' — found ' + raw.length + ' at line(s) ' + raw.join(', ') : ''),
+     raw.length === 0);
+  ok('setReply_ is the one place that does, and it scrubs',
+     /function setReply_\([\s\S]{0,200}?output\.setContent\(gxScrub_\(/.test(code));
+
+  /* createTextOutput WITH A BODY is the same door in a different shape — getStoresMeta_ returns a
+   * cached payload that way and bypassed jsonOut_ entirely. */
+  const bodied = [...code.matchAll(/ContentService\.createTextOutput\(([^)\n]*)\)/g)]
+    .filter(m => m[1].trim() !== '' && !/gxScrub_\(/.test(m[1]))
+    .map(m => code.slice(0, m.index).split('\n').length);
+  ok('every createTextOutput that is handed a body scrubs it'
+     + (bodied.length ? ' — found ' + bodied.length + ' at line(s) ' + bodied.join(', ') : ''),
+     bodied.length === 0);
+
+  /* EXECUTED: the helper itself, against a real leaking body, including the cached-hit path that a
+   * per-catch fix never reaches. */
+  const c = scrubCtx('');
+  vm.runInContext(grab('setReply_') + '\nthis.setReply_ = setReply_;', c);
+  const sink = { _t: null, setContent(t) { this._t = t; return this; } };
+  const FIX = ['cached', 'fixture', 'value', 'not', 'real', '0000'].join('-');
+  const body = JSON.stringify({ ok: true, note: 'see https://x/exec?connector_secret=' + FIX });
+  c.setReply_(sink, body);
+  ok('a CACHED body carrying a credential is scrubbed on the way out', sink._t.indexOf(FIX) === -1);
+  ok('...and the rest of the payload survives', /"ok":true/.test(sink._t));
+  c.setReply_(sink, null);
+  ok('a null body is handled rather than answering the string "null"', sink._t === '');
 }
 
 /* MUTATION LOG — each assertion above was shown failing against a deliberately broken source on

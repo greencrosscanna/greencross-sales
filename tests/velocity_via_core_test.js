@@ -14,6 +14,12 @@
 const fs = require('fs');
 const vm = require('vm');
 const GS   = fs.readFileSync(__dirname + '/../dutchie_proxy.gs', 'utf8');
+
+/* gxScrub_'s pattern is BUILT from AUTH_PARAM_NAMES_ — the same array the auth check reads — so the
+ * declarations have to come into the context with it. Lifted from the source, never retyped: a copy
+ * here would be a third hand-maintained list of the names, which is the defect that made this. */
+const SCRUB_DECLS = (/const AUTH_PARAM_NAMES_[\s\S]*?'gi'\);/.exec(GS) || [''])[0];
+
 const HTML = fs.readFileSync(__dirname + '/../index.html', 'utf8');
 
 let pass = 0, fail = 0;
@@ -40,7 +46,7 @@ function backend(getVelocity, cache) {
   vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
   /* The REAL scrub, not a stub: every exception this suite drives now also proves the
      credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
-  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
+  vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext([grab(GS, 'hasOwn_'), /const VELOCITY_CACHE_KEY_ = [^\n]*/.exec(GS)[0], grab(GS, 'getVelocity_'),
                    'this.getVelocity_ = getVelocity_;'].join('\n'), ctx);
   return ctx;
@@ -120,7 +126,7 @@ async function frontend(answer, cached) {
   vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
   /* The REAL scrub, not a stub: every exception this suite drives now also proves the
      credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
-  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
+  vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext(['let velocityError = null; let _velocityTriedAt = 0; let velocityData = null;',
                    grab(HTML, 'loadVelocity'),
                    'this.run = async () => { await loadVelocity(); return { velocityData, velocityError, _velocityTriedAt }; };'].join('\n'), ctx);

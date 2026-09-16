@@ -456,27 +456,69 @@ function cacheDelete_(key) {
  * query parameters we do NOT hold, which is what a session token in an echoed URL or a key in a
  * message from GX Core looks like.
  *
- * THE SECOND PASS MUST NAME EVERY PARAMETER `requireAuth_` ACCEPTS. It shipped naming only `token`,
- * while `requireAuth_` reads `params.token || params.session || params.auth` — so a request that
- * presented its session as `session=` or `auth=` had a LIVE USER TOKEN pass through untouched and
- * into the same error banner this function exists to clean. Found by core-admin (Leaderboard found
- * it in itself first) hours after the original shipped, and reproduced HERE by execution before
- * being believed: token redacted, session LEAKED, auth LEAKED, with secret/key/password/pwd as
- * passing controls. The first pass cannot cover it — that one holds GX_DEPLOY_SECRET, and what
- * escapes here is a different live credential belonging to a person, good until it expires.
+ * THE SECOND PASS IS BUILT FROM THE NAMES THE AUTH CHECK ACCEPTS — it does not keep its own copy
+ * of them. It first shipped naming only `token` while `requireAuth_` read
+ * `params.token || params.session || params.auth`, so a request presenting its session as
+ * `session=` or `auth=` put a LIVE USER TOKEN into the same error banner this function exists to
+ * clean. Adding the two missing words closed that gap on 2026-09-15 and left the mechanism that
+ * made it standing: TWO hand-typed lists in two functions that had to agree, with nothing
+ * comparing them. Core-admin measured the same shape in three of the suite's four scrubs the next
+ * night and asked for the structural fix rather than the words. So the list moved: AUTH_PARAM_NAMES_
+ * below is read by `authParamValue_` (the only sanctioned way to take a session off a request) AND
+ * concatenated into SECRET_PARAM_RE_. A new way to present a session is redacted the moment it is
+ * accepted, with no second edit to remember.
  *
- * The defect was never the regex; it was that the list was HAND-TYPED beside a second list it had
- * to agree with, in another function, with nothing comparing them. So the guard
- * (`tests/secret_scrub_test.js`) DERIVES the names from the `requireAuth_` line in this file and
- * requires each one to come back redacted. Add a way to present a session and the test fails until
- * this regex learns it — which is the only arrangement in which these two lists cannot drift apart
- * again. Do not "simplify" that derivation into a typed array; the typed array is the bug.
+ * AND IT IS ANCHORED ON THE PARAMETER BOUNDARY, NOT ON THE NAME. The old pattern required the
+ * credential word to sit immediately after a `?` or `&`, so it walked straight past a PREFIXED
+ * name. Measured against this app's live deployment on 2026-09-15, before any of this changed —
+ * `?action=…&store=zz?<name>=<fixture>`, whose echo comes back through the `Unknown store:` reply:
+ *
+ *     token ok · session ok · auth ok · secret ok · password ok · pwd ok
+ *     connector_secret LEAK · deploy_secret LEAK · api_key LEAK · apikey LEAK
+ *     refresh_token LEAK · x_auth LEAK · sessionid LEAK
+ *
+ * `connector_secret=` is not hypothetical: GX Core builds a URL with exactly that parameter, and
+ * this file re-throws Core's error text verbatim (`GX Core dutchie_get <path>: <data.error>`). The
+ * name now matches ANYWHERE inside the parameter name, so a prefix or a suffix cannot walk past it
+ * and there is no third list of prefixes to keep current. The cost is an occasional false
+ * redaction — `?monkey=` and `?keyword=` contain `key` — which costs one word in a message that
+ * was already an error, against a credential on a screen.
  *
  * IT MUST NEVER BE THE REASON A RESPONSE FAILS. `gxDeploySecret_` throws when the property is
  * unset, and a scrub that throws would turn a working app into a blank one — so the whole thing is
  * wrapped and falls through to the unscrubbed body. That is the correct trade only because the
  * second pass still runs: leaking is bad, and serving nothing is worse. */
 var _GX_SECRET_MEMO_ = null;   // per execution; a property read on every response is not free
+
+/* THE ONE LIST OF PARAMETER NAMES THAT CAN CARRY A SESSION CREDENTIAL. `authParamValue_` reads a
+ * session out of a request through it, and SECRET_PARAM_RE_ is BUILT from it — so a name this app
+ * accepts is a name this app redacts, by construction rather than by someone remembering to type it
+ * in two places. Reading `params.<something>` directly at a call site is what puts a name outside
+ * the scrub's reach; do not do it, and do not hand-type these names into the regex below.
+ *
+ * All three genuinely authenticate — verified live, `?action=stores` answers through each — so do
+ * not "tidy" the unused two away. `index.html` sends only `token=`; the other two are reachable by
+ * any client shaped by hand. */
+const AUTH_PARAM_NAMES_ = ['token', 'session', 'auth'];
+
+function authParamValue_(params) {
+  const p = params || {};
+  for (let i = 0; i < AUTH_PARAM_NAMES_.length; i++) {
+    if (p[AUTH_PARAM_NAMES_[i]]) return String(p[AUTH_PARAM_NAMES_[i]]);
+  }
+  return '';
+}
+
+/* Credential-shaped parameter names whose VALUES this app never holds and never accepts as a
+ * session — a key in a message from GX Core, a connector secret in an echoed URL. The auth names
+ * are appended rather than repeated. Order is not load-bearing: the name may sit anywhere inside
+ * the parameter, and the surrounding character classes backtrack, so `refresh_token` matches on
+ * `token` and `connector_secret` on `secret` without either being listed. */
+const SECRET_WORD_NAMES_ = ['secret', 'password', 'pwd', 'key', 'credential'].concat(AUTH_PARAM_NAMES_);
+
+const SECRET_PARAM_RE_ = new RegExp(
+  '([?&][A-Za-z0-9_.\\-]*(?:' + SECRET_WORD_NAMES_.join('|') + ')[A-Za-z0-9_.\\-]*=)[^&\\s"\'<>\\\\]*',
+  'gi');
 
 function gxScrub_(text) {
   var out = String(text);
@@ -489,15 +531,15 @@ function gxScrub_(text) {
       out = out.split(_GX_SECRET_MEMO_).join('[redacted]');
     }
   } catch (e) { /* fall through — see above */ }
-  return out.replace(/([?&](?:secret|token|session|auth|key|password|pwd)=)[^&\s"'\\]*/gi, '$1[redacted]');
+  return out.replace(SECRET_PARAM_RE_, '$1[redacted]');
 }
 
-/* EVERY EXCEPTION THAT BECOMES A RESPONSE GOES THROUGH HERE. jsonOut_ scrubs the finished body as
- * a backstop, but nine of this file's replies are built with `output.setContent(JSON.stringify(…))`
- * and never touch jsonOut_ at all — so a choke point alone would have covered two thirds of the
- * paths and read as complete. This is the layer the GATE enforces: no `error:` field in this file
- * may be handed a raw `.message`. That is checkable by a machine on every push, where "remember to
- * scrub" is not. */
+/* EVERY EXCEPTION THAT BECOMES A RESPONSE GOES THROUGH HERE. jsonOut_ scrubs the finished body and
+ * setReply_ (below) scrubs every hand-built reply, but this layer stays: an exception's text is the
+ * one thing in a reply that is KNOWN to have carried a URL, and catching it at the source is what
+ * keeps a raw message out of a log line or an email as well as out of a response. This is also the
+ * layer the GATE enforces: no `error:` field in this file may be handed a raw `.message`, which is
+ * checkable by a machine on every push where "remember to scrub" is not. */
 function errText_(e) {
   return gxScrub_((e && e.message) || (e == null ? '' : String(e)));
 }
@@ -505,6 +547,25 @@ function errText_(e) {
 function jsonOut_(data) {
   return ContentService.createTextOutput(gxScrub_(JSON.stringify(data)))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/* THE OTHER WAY OUT OF THIS FILE, AND THERE ARE FAR MORE OF THEM. jsonOut_ is one exit; the rest of
+ * this file builds its replies by hand — `ContentService.createTextOutput()` at the top of a
+ * handler and `setContent(...)` at each return — and none of those touched the scrub. RE-COUNTED
+ * 2026-09-15, which is the only honest way to size this: 54 reply-building exits — 18
+ * `createTextOutput` and 36 hand-built bodies — against 138 `jsonOut_` call sites that all funnel
+ * into one of those 18. The count is why a rule of the form
+ * "this catch is fixed" cannot hold across that many doors; the rule that can is NO REPLY MAY CARRY
+ * A RAW CREDENTIAL, enforced where the body is handed to the response rather than where the string
+ * is built.
+ *
+ * So every one of them goes through here, and `tests/secret_scrub_test.js` §9 fails — naming the
+ * line — if a `.setContent(` appears anywhere in this file outside this function. It scrubs cached
+ * bodies too, which is deliberate: a cached body was built by the same code paths, and a scrub that
+ * skipped the cache would leak on the second request and not the first. */
+function setReply_(output, body) {
+  output.setContent(gxScrub_(body == null ? '' : String(body)));
+  return output;
 }
 
 // ── Load timing marks — only collected while a loadprobe execution is running ─
@@ -663,8 +724,12 @@ function recordGuard_(props, entry) {
   }
 }
 
+/* The three names live in AUTH_PARAM_NAMES_ (see the scrub, above), not in this line. That is the
+ * whole point: the regex that redacts a session out of an error message is built from the same
+ * array this reads, so a fourth way to present one is protected the moment it is accepted. Do not
+ * reach for `params.token` here or anywhere else. */
 function requireAuth_(params) {
-  return validateSessionToken_(params.token || params.session || params.auth || '');
+  return validateSessionToken_(authParamValue_(params));
 }
 
 // Phase-2 shared sign-on: validate through GXCore (which checks app access grant),
@@ -1782,7 +1847,7 @@ function getISOWeek(date) {
 function getStoresMeta_() {
   // `_v2` carries store_id, which the client matches renames on. The old key's entries lack it.
   const HIT = cacheGet_('stores_meta_v2');
-  if (HIT) return ContentService.createTextOutput(HIT).setMimeType(ContentService.MimeType.JSON);
+  if (HIT) return ContentService.createTextOutput(gxScrub_(HIT)).setMimeType(ContentService.MimeType.JSON);
   try {
     const rows = GXCore.getStores().map(function(s) {
       return {
@@ -1795,7 +1860,7 @@ function getStoresMeta_() {
     });
     const body = JSON.stringify({ stores: rows });
     cacheSet_('stores_meta_v2', body, 3600); // 1-hour TTL — store list rarely changes
-    return ContentService.createTextOutput(body).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(gxScrub_(body)).setMimeType(ContentService.MimeType.JSON);
   } catch(e) {
     // GXCore hiccup — return empty list so frontend keeps its hardcoded fallback colors
     Logger.log('getStoresMeta_ GXCore.getStores failed: ' + e.message);
@@ -1807,17 +1872,17 @@ function getGoals() {
   const output = ContentService.createTextOutput();
   output.setMimeType(ContentService.MimeType.JSON);
   const cached = cacheGet_('goals');
-  if (cached) { output.setContent(cached); return output; }
+  if (cached) { setReply_(output, cached); return output; }
   // Frozen snapshot only — this app no longer opens the legacy budget workbook. See SHEET FREEZE.
   const goals = frozenGet_(FROZEN_GOALS_PROP);
   if (!goals) {
-    output.setContent(JSON.stringify({ error: 'no frozen goals — run action=freeze_sheet is gone; '
+    setReply_(output, JSON.stringify({ error: 'no frozen goals — run action=freeze_sheet is gone; '
       + 'restore the frozen_goals property or rely on GX Core period goals' }));
     return output;
   }
   const content = JSON.stringify({ goals: goals, year: BUDGET_YEAR, source: 'frozen' });
   cacheSet_('goals', content, 3600);
-  output.setContent(content);
+  setReply_(output, content);
   return output;
 }
 
@@ -2886,7 +2951,7 @@ function getDeposits(params) {
     const cacheKey = 'deposits_' + start + '_' + end + '_v1';
     if (!params?.nocache) {
       const cached = cacheGet_(cacheKey);
-      if (cached) { output.setContent(cached); return output; }
+      if (cached) { setReply_(output, cached); return output; }
     }
 
     const raw   = qbDepositsViaGXCore_(start, end);
@@ -2968,9 +3033,9 @@ function getDeposits(params) {
       config: getReconConfig_(), state: getReconState_(), assign: getReconAssign_(),
     });
     cacheSet_(cacheKey, content, 900);   // 15 min — deposits land during the day
-    output.setContent(content);
+    setReply_(output, content);
   } catch (err) {
-    output.setContent(JSON.stringify({ ok: false, error: errText_(err) }));
+    setReply_(output, JSON.stringify({ ok: false, error: errText_(err) }));
   }
   return output;
 }
@@ -2982,7 +3047,7 @@ function getExpenses(params) {
   const cacheKey = 'expenses_' + new Date().getFullYear() + '_v6';   // v6: response now carries qb_source
   if (!params?.debug && !params?.nocache) {
     const cached = cacheGet_(cacheKey);
-    if (cached) { output.setContent(cached); return output; }
+    if (cached) { setReply_(output, cached); return output; }
   }
   try {
     const today   = new Date();
@@ -3017,7 +3082,7 @@ function getExpenses(params) {
 
     // debug=true returns raw report for mapping verification
     if (params && params.debug === 'true') {
-      output.setContent(raw);
+      setReply_(output, raw);
       return output;
     }
 
@@ -3026,9 +3091,9 @@ function getExpenses(params) {
     const content = JSON.stringify({ expenses, columns: cols, allAccounts, unmappedCount,
                                      qb_source: qb.source, qb_fallback_reason: qb.fallback_reason });
     cacheSet_(cacheKey, content, 1800); // 30 min
-    output.setContent(content);
+    setReply_(output, content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: errText_(err) }));
+    setReply_(output, JSON.stringify({ error: errText_(err) }));
   }
   return output;
 }
@@ -3126,7 +3191,7 @@ function getExpenseBreakdown(params) {
     const cacheKey = 'expbreak_' + start + '_' + end + '_v1';
     if (!(params && params.nocache)) {
       const cached = cacheGet_(cacheKey);
-      if (cached) { output.setContent(cached); return output; }
+      if (cached) { setReply_(output, cached); return output; }
     }
 
     const qb     = qbProfitAndLoss_(start, end, 'Classes');
@@ -3169,9 +3234,9 @@ function getExpenseBreakdown(params) {
 
     const content = JSON.stringify({ ok: true, start, end, classes, categories, qb_source: qb.source });
     cacheSet_(cacheKey, content, 1800); // 30 min, same as the expenses payload it sits beside
-    output.setContent(content);
+    setReply_(output, content);
   } catch (err) {
-    output.setContent(JSON.stringify({ ok: false, error: errText_(err) }));
+    setReply_(output, JSON.stringify({ ok: false, error: errText_(err) }));
   }
   return output;
 }
@@ -3194,7 +3259,7 @@ function getPnl(params) {
   try {
     const by = String((params && params.by) || 'Classes');
     if (PNL_SUMMARIZE_BY_.indexOf(by) === -1) {
-      output.setContent(JSON.stringify({ error: 'bad by (want one of: ' + PNL_SUMMARIZE_BY_.join(', ') + ')' }));
+      setReply_(output, JSON.stringify({ error: 'bad by (want one of: ' + PNL_SUMMARIZE_BY_.join(', ') + ')' }));
       return output;
     }
 
@@ -3207,7 +3272,7 @@ function getPnl(params) {
     const cacheKey = 'pnl_' + by + '_' + start + '_' + end + '_v1';
     if (!params?.nocache) {
       const cached = cacheGet_(cacheKey);
-      if (cached) { output.setContent(cached); return output; }
+      if (cached) { setReply_(output, cached); return output; }
     }
 
     const qb     = qbProfitAndLoss_(start, end, by);
@@ -3230,9 +3295,9 @@ function getPnl(params) {
       qb_source: qb.source, qb_fallback_reason: qb.fallback_reason
     });
     cacheSet_(cacheKey, content, 1800); // 30 min, same as Expenses
-    output.setContent(content);
+    setReply_(output, content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: errText_(err) }));
+    setReply_(output, JSON.stringify({ error: errText_(err) }));
   }
   return output;
 }
@@ -3333,9 +3398,9 @@ function getEodTest(params) {
     for (const [path, qs] of paths) {
       results[path + (qs ? ' ' + qs.slice(0,30) : '')] = gxProbe_(store, path, qs);
     }
-    output.setContent(JSON.stringify(results));
+    setReply_(output, JSON.stringify(results));
   } catch(e) {
-    output.setContent(JSON.stringify({ error: errText_(e) }));
+    setReply_(output, JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }
@@ -3356,16 +3421,16 @@ function getTxFields(params) {
       includeItemDetails:      'true',
     });
     const tx   = rows.find(r => !r.isVoid && (r.transactionType||'').toLowerCase() === 'retail') || rows[0];
-    if (!tx) { output.setContent(JSON.stringify({ error: 'no transactions found' })); return output; }
+    if (!tx) { setReply_(output, JSON.stringify({ error: 'no transactions found' })); return output; }
     const items = tx.items || tx.lineItems || tx.orderItems || [];
-    output.setContent(JSON.stringify({
+    setReply_(output, JSON.stringify({
       txKeys:   Object.keys(tx),
       txSample: Object.fromEntries(Object.entries(tx).filter(([k,v]) => typeof v !== 'object')),
       itemKeys: items[0] ? Object.keys(items[0]) : [],
       itemSample: items[0] ? Object.fromEntries(Object.entries(items[0]).filter(([k,v]) => typeof v !== 'object')) : {},
     }));
   } catch(e) {
-    output.setContent(JSON.stringify({ error: errText_(e) }));
+    setReply_(output, JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }
@@ -3375,7 +3440,7 @@ function getQBMappingSheet() {
   const output = ContentService.createTextOutput();
   output.setMimeType(ContentService.MimeType.JSON);
   const pairs = frozenGet_(FROZEN_QBMAP_PROP);
-  output.setContent(JSON.stringify(pairs ? { pairs: pairs, source: 'frozen' }
+  setReply_(output, JSON.stringify(pairs ? { pairs: pairs, source: 'frozen' }
                                          : { error: 'no frozen QuickBooks mapping stored' }));
   return output;
 }
@@ -3584,7 +3649,7 @@ function getExpenseBudgets() {
   const output = ContentService.createTextOutput();
   output.setMimeType(ContentService.MimeType.JSON);
   const cached = cacheGet_('expbudgets');
-  if (cached) { output.setContent(cached); return output; }
+  if (cached) { setReply_(output, cached); return output; }
   // Frozen snapshot as the base, the applied smart budget overlaid per category on top. The legacy
   // workbook is no longer read at all — the overlay IS the budget for any category Sky has applied,
   // and the frozen figure covers the rest.
@@ -3604,7 +3669,7 @@ function getExpenseBudgets() {
                                    overlay_applied_at: ov ? ov.applied_at : null,
                                    overlay_applied_by: ov ? ov.applied_by : null });
   cacheSet_('expbudgets', content, 3600);
-  output.setContent(content);
+  setReply_(output, content);
   return output;
 }
 
@@ -3627,7 +3692,7 @@ function getTxDetail(params) {
   const retail = rows.filter(r => !r.isVoid && (r.transactionType||'').toLowerCase() === 'retail');
   const first  = retail.find(r => (r.items||r.lineItems||r.orderItems||[]).length > 0) || retail[0];
   const fi     = first ? (first.items || first.lineItems || first.orderItems || []) : [];
-  output.setContent(JSON.stringify({
+  setReply_(output, JSON.stringify({
     status: code,
     total: rows.length,
     withItems: retail.filter(r => (r.items||r.lineItems||r.orderItems||[]).length > 0).length,
@@ -3662,7 +3727,7 @@ function probeInventoryEndpoints(params) {
       results[path] = { status: 'error', preview: e.message };
     }
   }
-  output.setContent(JSON.stringify(results, null, 2));
+  setReply_(output, JSON.stringify(results, null, 2));
   return output;
 }
 
@@ -3684,7 +3749,7 @@ function getItemsTest(params) {
   const retail1 = rows1.filter(r => !r.isVoid && (r.transactionType||'').toLowerCase() === 'retail');
   const withItems1 = retail1.filter(r => (r.items||r.lineItems||r.orderItems||[]).length > 0);
 
-  output.setContent(JSON.stringify({
+  setReply_(output, JSON.stringify({
     includeLineItems_variant: { retail: retail1.length, withItems: withItems1.length },
     firstTxId: retail1[0]?.transactionId || null,
   }));
@@ -3698,7 +3763,7 @@ function getInvFields(params) {
   const store  = params.store || 'River';
   const items = gxDutchieGet_(store, '/reporting/inventory', {});
   const sample = items.slice(0, 3);
-  output.setContent(JSON.stringify({
+  setReply_(output, JSON.stringify({
     totalItems: items.length,
     keys: sample[0] ? Object.keys(sample[0]) : [],
     samples: sample,
@@ -3719,7 +3784,7 @@ function getInventory(params) {
 
   const cacheKey = 'inv_' + store;
   const cached = cacheGet_(cacheKey);
-  if (cached) { output.setContent(cached); return output; }
+  if (cached) { setReply_(output, cached); return output; }
 
   try {
     // gxDutchieGet_ throws on a non-200 or a refusal, and the catch below turns that into the same
@@ -3763,9 +3828,9 @@ function getInventory(params) {
 
     const content = JSON.stringify({ store, products: result });
     cacheSet_(cacheKey, content, 300); // 5 min
-    output.setContent(content);
+    setReply_(output, content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: errText_(err), store }));
+    setReply_(output, JSON.stringify({ error: errText_(err), store }));
   }
   return output;
 }
@@ -3800,14 +3865,14 @@ function getOtherRevenue() {
   const output = ContentService.createTextOutput();
   output.setMimeType(ContentService.MimeType.JSON);
   const cached = cacheGet_('otherrev');
-  if (cached) { output.setContent(cached); return output; }
+  if (cached) { setReply_(output, cached); return output; }
   try {
     const data    = getOtherRevData_();
     const content = JSON.stringify(data);
     cacheSet_('otherrev', content, 3600);
-    output.setContent(content);
+    setReply_(output, content);
   } catch(e) {
-    output.setContent(JSON.stringify({ error: errText_(e) }));
+    setReply_(output, JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }

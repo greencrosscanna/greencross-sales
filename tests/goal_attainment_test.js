@@ -22,6 +22,12 @@
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const GS = fs.readFileSync(path.join(__dirname, '..', 'dutchie_proxy.gs'), 'utf8');
 
+/* gxScrub_'s pattern is BUILT from AUTH_PARAM_NAMES_ — the same array the auth check reads — so the
+ * declarations have to come into the context with it. Lifted from the source, never retyped: a copy
+ * here would be a third hand-maintained list of the names, which is the defect that made this. */
+const SCRUB_DECLS = (/const AUTH_PARAM_NAMES_[\s\S]*?'gi'\);/.exec(GS) || [''])[0];
+
+
 function grab(src, name) {
   const re = new RegExp('\\nfunction ' + name + '\\s*\\(');
   const m = re.exec(src);
@@ -106,7 +112,7 @@ vm.createContext(ctx);
 vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
 /* The REAL scrub, not a stub: the read-error path below now also proves the credential scrub
    runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
-vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
+vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
 vm.runInContext(MAP_SRC[0] + '\n' + CAP_SRC[0] + '\n' + grab(GS, 'hasOwn_') + '\n' + grab(GS, 'salesStoreKey_') + '\n' +
                  grab(GS, 'salesStores_') + '\n' + grab(GS, 'attainProbe_'), ctx);
 

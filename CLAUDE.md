@@ -819,6 +819,60 @@ it.** Re-reading is what produced all five; it is the activity that feels like v
 is not. *Two of the five were in fixes that had shipped the same day and looked complete —
 including the one directly above this section.*
 
+### ONE list now: the names the auth check accepts ARE the names the scrub redacts (v2.600)
+
+The two fixes above were both right and both incomplete, for the same reason, and the third one
+stops the reason rather than the symptom. **The accepted parameter names and the redacted ones were
+two hand-typed lists in two functions that had to agree, with nothing comparing them.** Core-admin
+measured all four of the suite's scrubs on 2026-09-16 and three of them had drifted the same way.
+Adding the missing words — which is what v2.599's follow-up did — closes today's gap and leaves the
+mechanism that made it.
+
+- **`AUTH_PARAM_NAMES_` is the one list.** `authParamValue_` reads a session off a request through
+  it (`requireAuth_` no longer touches `params.token` at all), and `SECRET_PARAM_RE_` is BUILT from
+  it via `SECRET_WORD_NAMES_.concat(AUTH_PARAM_NAMES_)`. A fourth way to present a session is
+  redacted the moment it is accepted, with no second edit to remember. Verified by mutation: adding
+  `sid` to the array made the test exercise `sid=` and pass with **no edit to the test file**.
+- **The real remaining leak was the ANCHORING, and it was live.** The shipped pattern required the
+  credential word to sit immediately after a `?` or `&`, so an underscore in front of it walked
+  straight past. **Measured against this app's live `/exec` before anything was changed**, echoing a
+  fixture value back through the `Unknown store:` reply with a read-only dev session:
+  `token`/`session`/`auth`/`secret`/`password`/`pwd` redacted; **`connector_secret`, `deploy_secret`,
+  `api_key`, `apikey`, `refresh_token`, `x_auth` and `sessionid` came back in full.** That is not
+  hypothetical: **GX Core builds a URL with `?connector_secret=`**, and `gxDutchieGet_` re-throws
+  Core's error text verbatim. The name now matches anywhere inside the parameter name, so there is
+  no third list of prefixes to keep current. The cost is an occasional false redaction (`?keyword=`
+  contains `key`) — one word in a message that was already an error, against a credential on screen.
+- **Every reply exit scrubs, not every catch.** Re-counted: **54 reply-building exits** — 18
+  `ContentService.createTextOutput` and 36 hand-built bodies — against 138 `jsonOut_` call sites
+  that all funnel into one of those 18. Each hand-built body now goes through **`setReply_`**, which
+  scrubs; `getStoresMeta_`'s two direct `createTextOutput(body)` returns were the other two doors and
+  are wrapped. **Cached bodies are scrubbed too** — a scrub that skipped the cache leaks on the
+  second request and not the first, which is the worst possible reproduction case. Cost measured at
+  **0.2ms on a 981KB payload**, byte-identical out.
+- **The test may not take its facts from the thing it is checking.** `tests/secret_scrub_test.js` is
+  **64 assertions** now. §7 derives the names from the source; §7's **floor** and all of §8 are
+  **hardcoded** and unreachable from the implementation, so a REMOVAL fails loudly instead of
+  quietly shrinking the test. That trap is not theoretical — core-admin's first version of this
+  passed 23 of 23 with `session` deleted from the source, and Price Cards' passed 62 of 62.
+- **Mutation-verified in seven directions**, each failing the right assertion: `session` deleted from
+  the list → 5 fail **including the floor**; `sid` added → 66 pass, the new name testing itself; the
+  regex typed by hand instead of built → 11 fail; the anchoring reverted to the shipped pattern → 15
+  fail, exactly the names measured leaking live; one reply exit of 54 un-wrapped → 1 fail **naming
+  the line**; the cached stores payload un-wrapped → 1 fail naming the line; `requireAuth_` reading
+  `params.<name>` again → 1 fail.
+- **A red line has to be actionable.** The section-6 and section-9 source checks used to strip
+  comments by deleting them, which reported a line number ~350 short of the real one in a 6,000-line
+  file. Comments are now blanked with their newlines KEPT, so the number printed is the number in
+  `dutchie_proxy.gs` — confirmed against both mutations.
+- **Five other suites execute `gxScrub_` as a dependency** and now load `AUTH_PARAM_NAMES_` out of
+  the source alongside it (`SCRUB_DECLS`). None of them retypes the names; a copy in a test file is
+  a third hand-maintained list.
+- **This one DID bump `APP_VERSION`** (v2.599 → v2.600) even though `index.html` is otherwise
+  untouched, unlike the 2026-09-15 follow-up that shipped as a bare commit. A backend-only ship with
+  no number is a release nobody can name afterwards — that note had to cite a sha and explain where
+  to read it. The cost is one reload of open tabs.
+
 ### The screenshot died one line short of the board (v2.598, 2026-09-15)
 
 Filed by core-admin, measured live: **140 bug reports across all seven apps, not one with a

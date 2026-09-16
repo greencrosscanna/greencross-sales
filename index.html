@@ -592,6 +592,14 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 .ic-hero-lbl{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;line-height:1.4}
 .ic-hero-live{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--green);flex-shrink:0}
 .ic-hero-live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s ease-in-out infinite;flex-shrink:0}
+/* The hero's live light was green in every state because nothing ever set it otherwise. Amber while
+   the total is short a store's today, red when a store failed outright — the mobile counterpart of
+   the desktop pill's color, driven by _heroLiveHtml_ off the same two facts (_storeStateMap,
+   _todayPending) the per-store blink reads. */
+.ic-hero-live.stale{color:var(--amber)}
+.ic-hero-live.stale .ic-hero-live-dot{background:var(--amber)}
+.ic-hero-live.failed{color:var(--red)}
+.ic-hero-live.failed .ic-hero-live-dot{background:var(--red)}
 .ic-hero-val{font-size:38px;font-weight:500;color:var(--text);line-height:1.05;letter-spacing:-.01em}
 .ic-hero-bar{position:relative;height:6px;margin:12px 0 8px}
 .ic-hero-foot{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
@@ -1410,7 +1418,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.601';
+const APP_VERSION = 'v2.602';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -4818,6 +4826,44 @@ function compareSub(cur, base, fallbackHtml) {
 
 // ─── Income sub-builders ──────────────────────────────────────────────────────
 
+/* THE PHONE HAD NO COMPANY-LEVEL "THIS FIGURE IS SHORT" AT ALL.
+ *
+ * pill() writes to #dsk-live-txt and nothing else, so `6/6 stores · today pending: River` — the one
+ * line saying the number above it is understated — existed on the desktop and NOWHERE on mobile.
+ * The hero's live dot is hardcoded green in the stylesheet and is never touched by JS, so a total
+ * missing a store's today sat under a confident green light, on the device every 60+sec report has
+ * come from. That is the Inventory tile's green 0 again, and the River shape underneath it: a
+ * per-store failure degrading into a smaller number instead of a message.
+ *
+ * The per-store blink (v2.591) says WHICH row is not current. This says the COMPANY total is not
+ * whole — a different statement, and the one the hero figure needs.
+ *
+ * Built ONCE and used by all three hero branches. The three ic-hero-top blocks are hand-copied, and
+ * a note added to two of the three is the bug_ingest re-pack hazard wearing different clothes.
+ */
+function _heroLiveHtml_(syncTime, periodDay) {
+  const tail   = periodDay ? ' · ' + periodDay : '';
+  const names  = STORES.map(s => s.name);
+  const failed = names.filter(n => _storeStateMap && _storeStateMap[n] === 'err');
+  // Same guard storeNotCurrent_ uses: the set is not cleared by a load that never reaches today, so
+  // an August view must not report a September miss.
+  const pend   = viewIncludesToday_() ? names.filter(n => _todayPending.has(n)) : [];
+  let cls = '', note = '';
+  if (failed.length) {
+    // 'err' is the stronger statement — a store that failed outright is not merely today-pending.
+    cls  = ' failed';
+    note = ` · ${names.length - failed.length}/${names.length} stores`;
+  } else if (pend.length) {
+    cls  = ' stale';
+    // Named while one name fits; a count once it does not. The blinking row dot says which either way.
+    note = pend.length === 1 ? ` · ${pend[0]} pending` : ` · ${pend.length} stores pending`;
+  }
+  return `<div class="ic-hero-live${cls}">
+        <div class="ic-hero-live-dot"></div>
+        <span>${syncTime}${tail}${note}</span>
+      </div>`;
+}
+
 function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, under, opts) {
   const o = opts || {};
   const today       = new Date();
@@ -4845,10 +4891,7 @@ function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, und
     return `
     <div class="ic-hero-top">
       <span class="ic-hero-lbl">Net sales · ${getPeriodLabel()}</span>
-      <div class="ic-hero-live">
-        <div class="ic-hero-live-dot"></div>
-        <span>${syncTime}${periodDay ? ' · ' + periodDay : ''}</span>
-      </div>
+      ${_heroLiveHtml_(syncTime, periodDay)}
     </div>
     <div class="ic-hero-val"><span class="val-skel ic-hero-skel"></span></div>
     <div class="ic-hero-bar"><div class="sbar-track"></div></div>
@@ -4868,10 +4911,7 @@ function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, und
     return `
     <div class="ic-hero-top">
       <span class="ic-hero-lbl">Net sales · ${getPeriodLabel()}</span>
-      <div class="ic-hero-live">
-        <div class="ic-hero-live-dot"></div>
-        <span>${syncTime}${periodDay ? ' · ' + periodDay : ''}</span>
-      </div>
+      ${_heroLiveHtml_(syncTime, periodDay)}
     </div>
     <div class="ic-hero-val">${fmtK(net)}</div>
     <div class="ic-hero-bar"><div class="sbar-track"></div></div>
@@ -4887,10 +4927,7 @@ function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, und
   return `
     <div class="ic-hero-top">
       <span class="ic-hero-lbl">Net sales · ${getPeriodLabel()}</span>
-      <div class="ic-hero-live">
-        <div class="ic-hero-live-dot"></div>
-        <span>${syncTime}${periodDay ? ' · ' + periodDay : ''}</span>
-      </div>
+      ${_heroLiveHtml_(syncTime, periodDay)}
     </div>
     <div class="ic-hero-val">${fmtK(net)}</div>
     ${periodGoal > 0 ? `

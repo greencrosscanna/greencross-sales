@@ -102,6 +102,10 @@ function buildCtx() {
     },
   };
   vm.createContext(ctx);
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
+  /* The REAL scrub, not a stub: every exception this suite drives now also proves the
+     credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
+  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext('let _gxStoreRegistry_ = null; let _gxStoreNames_ = null; let _gxStoreIds_ = null;', ctx);
   vm.runInContext(grab(GS, 'gxStoreRegistry_'), ctx);
   vm.runInContext(grab(GS, 'gxStoreNames_'), ctx);

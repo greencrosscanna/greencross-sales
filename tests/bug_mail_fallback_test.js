@@ -93,6 +93,10 @@ function session(opts) {
     jsonOut_: function (o) { return o; }
   };
   vm.createContext(ctx);
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
+  /* The REAL scrub, not a stub: every exception this suite drives now also proves the
+     credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
+  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext(grab(GS, 'bugNotify_') + '\n' + grab(GS, 'bugMailOnce_') + '\n'
                 + grab(GS, 'reportBug_'), ctx);
 

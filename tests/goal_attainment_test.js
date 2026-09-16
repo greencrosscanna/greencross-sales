@@ -103,6 +103,10 @@ const ctx = {
   }),
 };
 vm.createContext(ctx);
+vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
+/* The REAL scrub, not a stub: the read-error path below now also proves the credential scrub
+   runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
+vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
 vm.runInContext(MAP_SRC[0] + '\n' + CAP_SRC[0] + '\n' + grab(GS, 'hasOwn_') + '\n' + grab(GS, 'salesStoreKey_') + '\n' +
                  grab(GS, 'salesStores_') + '\n' + grab(GS, 'attainProbe_'), ctx);
 

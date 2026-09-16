@@ -159,7 +159,7 @@ function gxStoreRegistry_() {
   try {
     rows = GXCore.getStores() || [];
   } catch (e) {
-    throw new Error('GX Core store registry unreachable: ' + ((e && e.message) || e));
+    throw new Error('GX Core store registry unreachable: ' + errText_(e));
   }
   if (!rows.length) throw new Error('GX Core returned no stores');
   return (_gxStoreRegistry_ = rows);
@@ -244,7 +244,7 @@ function gxProbe_(store, path, qs) {
     const body = JSON.stringify(out);
     return { status: 200, preview: body.slice(0, 800), count: Array.isArray(out) ? out.length : null };
   } catch (e) {
-    return { status: 'via-gx-core', error: String((e && e.message) || e) };
+    return { status: 'via-gx-core', error: errText_(e) };
   }
 }
 
@@ -322,7 +322,7 @@ function storeGate_(store) {
       row = GXCore.resolveStore(s);
     } catch (e) {
       // NOT a `false`. Nothing has been learned about this name.
-      throw new Error('GX Core store registry unreachable: ' + ((e && e.message) || e));
+      throw new Error('GX Core store registry unreachable: ' + errText_(e));
     }
     id = row && row.store_id ? String(row.store_id).toLowerCase() : '';
     // A null answer IS an answer — the registry does not know this name — so caching it is safe and
@@ -350,7 +350,7 @@ function storeGateError_(store) {
   try {
     if (storeGate_(store).ok) return null;
   } catch (e) {
-    return jsonOut_({ ok: false, error: (e && e.message) || 'GX Core store registry unreachable' });
+    return jsonOut_({ ok: false, error: errText_(e) || 'GX Core store registry unreachable' });
   }
   return jsonOut_({ ok: false, error: 'Unknown store: ' + store });
 }
@@ -430,8 +430,64 @@ function cacheDelete_(key) {
 }
 
 // ── JSON response helper ──────────────────────────────────────────────────────
+/* ─── NOTHING LEAVES THIS SCRIPT CARRYING A CREDENTIAL ──────────────────────────────────────────
+ *
+ * Reported by SPIFF via core-admin 2026-09-15, after it found and fixed the same shape in its own
+ * router (v1.423). **Confirmed reachable here before changing anything**, which is what the note
+ * asked for:
+ *
+ *   `gxDutchieGet_` builds `GXCORE_EXEC_ + '?action=dutchie_get&…&secret=' + gxDeploySecret_()` and
+ *   hands it to `UrlFetchApp.fetch`. `muteHttpExceptions: true` suppresses HTTP status errors — it
+ *   does NOT suppress a transport failure, and there is no try around that call. When Apps Script
+ *   cannot reach the address it throws `Address unavailable: <the whole URL>`, query string and
+ *   all. That escaped to `getStoreSales_`'s catch, which answered `{ error: <the raw message> }`, and the
+ *   browser paints it in the store's error slot — **the deploy secret, on a screen, in the office**.
+ *   Four outbound fetches carry the secret and all four are reachable this way.
+ *
+ * THE SCRUB LIVES IN `jsonOut_`, NOT IN THE 23 CATCH BLOCKS THAT RETURN `e.message`. Fixing the
+ * catches means finding all of them and remembering forever; every new route is a new chance to
+ * forget, and forgetting is silent. Every response in this file goes through this one function, so
+ * a leak cannot be introduced by a call site that did not know the rule. It also covers what a
+ * per-catch fix would miss: a secret nested inside a `stage`, a `detail`, a probe's echoed URL, or
+ * anywhere else in the payload.
+ *
+ * TWO PASSES, FOR TWO DIFFERENT THINGS. The first removes the exact value we hold, wherever it
+ * appears and however it got there — no pattern to outsmart. The second removes credential-shaped
+ * query parameters we do NOT hold, which is what a session token in an echoed URL or a key in a
+ * message from GX Core looks like.
+ *
+ * IT MUST NEVER BE THE REASON A RESPONSE FAILS. `gxDeploySecret_` throws when the property is
+ * unset, and a scrub that throws would turn a working app into a blank one — so the whole thing is
+ * wrapped and falls through to the unscrubbed body. That is the correct trade only because the
+ * second pass still runs: leaking is bad, and serving nothing is worse. */
+var _GX_SECRET_MEMO_ = null;   // per execution; a property read on every response is not free
+
+function gxScrub_(text) {
+  var out = String(text);
+  try {
+    if (_GX_SECRET_MEMO_ === null) {
+      _GX_SECRET_MEMO_ = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
+    }
+    // Length-guarded: a short or empty property would otherwise redact half the payload.
+    if (_GX_SECRET_MEMO_ && _GX_SECRET_MEMO_.length >= 8) {
+      out = out.split(_GX_SECRET_MEMO_).join('[redacted]');
+    }
+  } catch (e) { /* fall through — see above */ }
+  return out.replace(/([?&](?:secret|token|key|password|pwd)=)[^&\s"'\\]*/gi, '$1[redacted]');
+}
+
+/* EVERY EXCEPTION THAT BECOMES A RESPONSE GOES THROUGH HERE. jsonOut_ scrubs the finished body as
+ * a backstop, but nine of this file's replies are built with `output.setContent(JSON.stringify(…))`
+ * and never touch jsonOut_ at all — so a choke point alone would have covered two thirds of the
+ * paths and read as complete. This is the layer the GATE enforces: no `error:` field in this file
+ * may be handed a raw `.message`. That is checkable by a machine on every push, where "remember to
+ * scrub" is not. */
+function errText_(e) {
+  return gxScrub_((e && e.message) || (e == null ? '' : String(e)));
+}
+
 function jsonOut_(data) {
-  return ContentService.createTextOutput(JSON.stringify(data))
+  return ContentService.createTextOutput(gxScrub_(JSON.stringify(data)))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -661,7 +717,7 @@ function doGet(e) {
       const r = GXCore.login(params.user || '__probe__', params.pass || '__probe__', 'sales');
       return jsonOut_({ gxcore: { ok: r.ok, user: r.user, role: r.role, error: r.error, hasToken: !!r.token } });
     } catch(e) {
-      return jsonOut_({ gxcore: null, error: e.message });
+      return jsonOut_({ gxcore: null, error: errText_(e) });
     }
   }
 
@@ -712,7 +768,7 @@ function doGet(e) {
       }
       return jsonOut_({ ok: true, app: 'sales', gxcore_version: GXCore.libVersion(), qb: qb });
     } catch (e) {
-      return jsonOut_({ ok: false, error: e.message });
+      return jsonOut_({ ok: false, error: errText_(e) });
     }
   }
 
@@ -727,7 +783,7 @@ function doGet(e) {
       if (typeof GXCore.libVersion !== 'function') return jsonOut_({ ok: false, error: 'pinned GXCore has no libVersion() - pre-v153' });
       return jsonOut_({ ok: true, gxcore: GXCore.libVersion() });
     } catch (e) {
-      return jsonOut_({ ok: false, error: e.message });
+      return jsonOut_({ ok: false, error: errText_(e) });
     }
   }
 
@@ -872,7 +928,7 @@ function doGet(e) {
         ties_out: failed.length === 0, failed_columns: failed
       });
     } catch (e) {
-      return jsonOut_({ ok: false, stage: 'probe', error: e.message });
+      return jsonOut_({ ok: false, stage: 'probe', error: errText_(e) });
     }
   }
 
@@ -942,7 +998,7 @@ function doGet(e) {
         rows
       });
     } catch (e) {
-      return jsonOut_({ ok: false, stage: 'probe', error: e.message });
+      return jsonOut_({ ok: false, stage: 'probe', error: errText_(e) });
     }
   }
 
@@ -1103,7 +1159,7 @@ function doGet(e) {
         week_starts: data.config
       });
     } catch (e) {
-      return jsonOut_({ ok: false, stage: 'probe', error: e.message });
+      return jsonOut_({ ok: false, stage: 'probe', error: errText_(e) });
     }
   }
 
@@ -1174,7 +1230,7 @@ function doGet(e) {
         })
       });
     } catch (e) {
-      return jsonOut_({ ok: false, stage: 'probe', error: e.message });
+      return jsonOut_({ ok: false, stage: 'probe', error: errText_(e) });
     }
   }
 
@@ -1266,7 +1322,7 @@ function doGet(e) {
   try {
     gate = storeGate_(store);
   } catch (e) {
-    return jsonOut_({ error: (e && e.message) || 'GX Core store registry unreachable' });
+    return jsonOut_({ error: errText_(e) || 'GX Core store registry unreachable' });
   }
   if (!gate.ok) return jsonOut_({ error: 'Unknown store: ' + store });
 
@@ -1416,7 +1472,7 @@ function getStoreSales_(store, from, to, nocache, phase) {
       phase: wantSettled && wantLive ? 'both' : (wantSettled ? 'settled' : 'live'),
     });
   } catch (err) {
-    return jsonOut_({ error: err.message });
+    return jsonOut_({ error: errText_(err) });
   }
 }
 
@@ -1453,7 +1509,7 @@ function loadProbe_(params) {
     _PROBE_MARKS = [];
     const tk = Date.now();
     let known = false, gateErr = null;
-    try { known = knownStore_(name); } catch (e) { gateErr = (e && e.message) || String(e); }
+    try { known = knownStore_(name); } catch (e) { gateErr = errText_(e); }
     probeMark_('known_store', Date.now() - tk, { exact: gxStoreNames_().indexOf(String(name)) !== -1 });
     if (!known) {
       out.push({ store: name, known: false, error: gateErr, marks: _PROBE_MARKS });
@@ -1820,7 +1876,7 @@ function getPeriodGoalsForDate_(date) {
     }
     return jsonOut_({ ok: true, date, goals });
   } catch(e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -2120,7 +2176,7 @@ function attainProbe_(start, end) {
 
   let pg;
   try { pg = JSON.parse(getPeriodGoalsRange_(start, end).getContent()); }
-  catch (e) { return jsonOut_({ ok: false, stage: 'period_goals_range', error: e.message }); }
+  catch (e) { return jsonOut_({ ok: false, stage: 'period_goals_range', error: errText_(e) }); }
   if (!pg.ok) return jsonOut_({ ok: false, stage: 'period_goals_range', error: pg.error });
 
   const todayPT        = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
@@ -2163,7 +2219,7 @@ function attainProbe_(start, end) {
       // Named, never silent: a store whose read failed has an EMPTY day map, so every one of its
       // periods reports days_missing and drops out of the totals on its own. Without this list that
       // is indistinguishable from a store that simply had no sales.
-      readErrors.push({ store: s.sales, error: e.message });
+      readErrors.push({ store: s.sales, error: errText_(e) });
     }
   }
 
@@ -2661,7 +2717,7 @@ function setReconConfig_(params) {
     PropertiesService.getScriptProperties().setProperty(RECON_CFG_PROP_, JSON.stringify(cfg));
     return jsonOut_({ ok: true, config: cfg });
   } catch (e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -2693,7 +2749,7 @@ function setRecon_(params, user) {
     PropertiesService.getScriptProperties().setProperty(RECON_STATE_PROP_, JSON.stringify(state));
     return jsonOut_({ ok: true, state: state });
   } catch (e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -2724,7 +2780,7 @@ function setReconAssign_(params) {
     PropertiesService.getScriptProperties().setProperty(RECON_ASSIGN_PROP_, JSON.stringify(a));
     return jsonOut_({ ok: true, assign: a });
   } catch (e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -2898,7 +2954,7 @@ function getDeposits(params) {
     cacheSet_(cacheKey, content, 900);   // 15 min — deposits land during the day
     output.setContent(content);
   } catch (err) {
-    output.setContent(JSON.stringify({ ok: false, error: err.message }));
+    output.setContent(JSON.stringify({ ok: false, error: errText_(err) }));
   }
   return output;
 }
@@ -2956,7 +3012,7 @@ function getExpenses(params) {
     cacheSet_(cacheKey, content, 1800); // 30 min
     output.setContent(content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: err.message }));
+    output.setContent(JSON.stringify({ error: errText_(err) }));
   }
   return output;
 }
@@ -3099,7 +3155,7 @@ function getExpenseBreakdown(params) {
     cacheSet_(cacheKey, content, 1800); // 30 min, same as the expenses payload it sits beside
     output.setContent(content);
   } catch (err) {
-    output.setContent(JSON.stringify({ ok: false, error: err.message }));
+    output.setContent(JSON.stringify({ ok: false, error: errText_(err) }));
   }
   return output;
 }
@@ -3160,7 +3216,7 @@ function getPnl(params) {
     cacheSet_(cacheKey, content, 1800); // 30 min, same as Expenses
     output.setContent(content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: err.message }));
+    output.setContent(JSON.stringify({ error: errText_(err) }));
   }
   return output;
 }
@@ -3263,7 +3319,7 @@ function getEodTest(params) {
     }
     output.setContent(JSON.stringify(results));
   } catch(e) {
-    output.setContent(JSON.stringify({ error: e.message }));
+    output.setContent(JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }
@@ -3293,7 +3349,7 @@ function getTxFields(params) {
       itemSample: items[0] ? Object.fromEntries(Object.entries(items[0]).filter(([k,v]) => typeof v !== 'object')) : {},
     }));
   } catch(e) {
-    output.setContent(JSON.stringify({ error: e.message }));
+    output.setContent(JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }
@@ -3376,7 +3432,7 @@ function getVelocity_(params) {
   try {
     rows = GXCore.getVelocity('') || [];
   } catch (e) {
-    return { ok: false, error: 'GX Core velocity unavailable: ' + ((e && e.message) || e) };
+    return { ok: false, error: 'GX Core velocity unavailable: ' + errText_(e) };
   }
   const nameById = {};
   salesStores_().forEach(function (st) { nameById[st.core] = st.dutchie; });
@@ -3693,7 +3749,7 @@ function getInventory(params) {
     cacheSet_(cacheKey, content, 300); // 5 min
     output.setContent(content);
   } catch (err) {
-    output.setContent(JSON.stringify({ error: err.message, store }));
+    output.setContent(JSON.stringify({ error: errText_(err), store }));
   }
   return output;
 }
@@ -3735,7 +3791,7 @@ function getOtherRevenue() {
     cacheSet_('otherrev', content, 3600);
     output.setContent(content);
   } catch(e) {
-    output.setContent(JSON.stringify({ error: e.message }));
+    output.setContent(JSON.stringify({ error: errText_(e) }));
   }
   return output;
 }
@@ -3754,7 +3810,7 @@ function setOtherRevenue(params) {
     cacheDelete_('otherrev');
     return jsonOut_({ ok: true, data });
   } catch(e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -3839,7 +3895,7 @@ function getRevenueDetail(params) {
 
     return jsonOut_({ ok: true, year, cfg, atm, sub });
   } catch(e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -3870,7 +3926,7 @@ function setRevenueLine(params) {
     cacheDelete_('otherrev');
     return jsonOut_({ ok: true });
   } catch(e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -4000,7 +4056,7 @@ function reportBug_(params, reporter) {
 
     return jsonOut_({ ok: true });
   } catch(e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -4026,7 +4082,7 @@ function bugNotify_(o) {
        reports. Absent when the page threw nothing, rather than a header standing over an empty list. */
     if (o.errors.length) {
       lines.push('', 'JS errors captured before submit (' + o.errors.length + '):');
-      o.errors.forEach(function (e) { lines.push('  - ' + String(e).slice(0, 200)); });
+      o.errors.forEach(function (e) { lines.push('  - ' + errText_(e).slice(0, 200)); });
     }
     lines.push('', o.desc || '(no details provided)');
     MailApp.sendEmail({ to: 'sky@greencrosscanna.com', subject: o.subject, body: lines.join('\n') });
@@ -4612,7 +4668,7 @@ function getBudgetProposal(params) {
     cacheSet_(key, JSON.stringify(out), 3600);
     return jsonOut_(out);
   } catch (e) {
-    return jsonOut_({ ok: false, error: e.message });
+    return jsonOut_({ ok: false, error: errText_(e) });
   }
 }
 
@@ -4879,7 +4935,7 @@ function adminApplyProposed_(params) {
     const win = sbHistoryWindow_();
     built = sbBuildProposal_(year, sbFetchHistory_(win.start, win.end));
   } catch (e) {
-    return jsonOut_({ ok: false, stage: 'proposal', error: e.message });
+    return jsonOut_({ ok: false, stage: 'proposal', error: errText_(e) });
   }
 
   const byCat = {};

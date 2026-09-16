@@ -37,6 +37,10 @@ function backend(getVelocity, cache) {
     _cache: store,
   };
   vm.createContext(ctx);
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
+  /* The REAL scrub, not a stub: every exception this suite drives now also proves the
+     credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
+  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext([grab(GS, 'hasOwn_'), /const VELOCITY_CACHE_KEY_ = [^\n]*/.exec(GS)[0], grab(GS, 'getVelocity_'),
                    'this.getVelocity_ = getVelocity_;'].join('\n'), ctx);
   return ctx;
@@ -113,6 +117,10 @@ async function frontend(answer, cached) {
     gasFetchJson: async (url) => { ctx._url = url; if (answer instanceof Error) throw answer; return answer; },
   };
   vm.createContext(ctx);
+  vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
+  /* The REAL scrub, not a stub: every exception this suite drives now also proves the
+     credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
+  vm.runInContext(grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext(['let velocityError = null; let _velocityTriedAt = 0; let velocityData = null;',
                    grab(HTML, 'loadVelocity'),
                    'this.run = async () => { await loadVelocity(); return { velocityData, velocityError, _velocityTriedAt }; };'].join('\n'), ctx);

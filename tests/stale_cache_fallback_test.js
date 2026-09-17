@@ -168,6 +168,10 @@ function makeWorld() {
     hiddenOtherRevs: new Set(),
     activeDay: null, activeWeek: null, activeMonth: 9, activeYear: 2026,
     _expBudgetsTried: false, _expBudgetsLoading: false,
+    /* The request queue's stuck-slot watchdog arms a timer. Nothing here should ever fire it — the
+       fakes settle synchronously — so a no-op is the honest fake; a firing one would release a lane
+       that is still in use and measure the harness rather than the loader. */
+    setTimeout: () => 1, clearTimeout: () => {},
   };
   w.Date = function FakeDate(a) { return arguments.length ? new Date(a) : new Date(w.clock); };
   w.Date.now = () => w.clock;
@@ -177,7 +181,21 @@ function makeWorld() {
   return w;
 }
 
+/* THE REAL REQUEST QUEUE, lifted whole rather than stubbed. loadOtherRevenue takes a SCREEN lane
+   before it fires, so without this every section below reaches loadOtherRevenue's catch through a
+   ReferenceError instead of through the fetch failure it is written to test — and sections 12 and
+   13 PASSED that way while section 15 failed, which is this repo's oldest trap wearing a new hat: a
+   test that goes green for a reason that has nothing to do with its subject. Slice runs from the
+   first declaration to gasFetchJson, which sits immediately after it in index.html. */
+const GASQ = (() => {
+  const a = HTML.indexOf('const GAS_MAX_INFLIGHT');
+  const b = HTML.indexOf('async function gasFetchJson');
+  if (a < 0 || b < 0 || b < a) throw new Error('the request queue moved — re-anchor GASQ');
+  return HTML.slice(a, b);
+})();
+
 const SRC = [
+  GASQ,
   grabOr('readCache'), grabOr('writeCache'), grabOr('readStaleCache'), grabOr('fmtCacheAgo_'),
   grabOr('applyExpBudgets_'), grabOr('loadExpBudgets'), grabOr('expBudgetOrigin_'),
   grabOr('loadOtherRevenue'), grabOr('computeOtherRev'), grabOr('_incomeOtherRevHtml'),

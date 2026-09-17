@@ -28,6 +28,15 @@
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const HTML = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 
+/* The lane constants come OUT OF index.html, never retyped here. backfillDailyHistory names
+   GAS_PRIO.BACKGROUND at its call site, and a hand-typed copy in this file is a second list that
+   can silently disagree with the app's — the same trap SECRET_PARAM_RE_ was built to end. */
+function gasLaneDecls() {
+  const m = /const GAS_PRIO = Object\.freeze\(\{[\s\S]*?\n\}\);/.exec(HTML);
+  if (!m) throw new Error('GAS_PRIO not found in index.html — did the request queue move?');
+  return m[0];
+}
+
 function grab(name) {
   const re = new RegExp('\\n\\s*(?:async\\s+)?function ' + name + '\\s*\\([^)]*\\)\\s*\\{');
   const m = re.exec(HTML);
@@ -150,7 +159,7 @@ function run({ cachedMonths = {}, activeYear = 2026, stores = STORES, seeded = {
   };
   ctx.decodeURIComponent = decodeURIComponent;
   vm.createContext(ctx);
-  vm.runInContext(grab('backfillDailyHistory'), ctx);
+  vm.runInContext(gasLaneDecls() + '\n' + grab('backfillDailyHistory'), ctx);
   return ctx.backfillDailyHistory(PROXY).then(() => ({
     requests, cacheReads, cacheWrites, histWrites, allDailyData, renders, statusGrids, peakInflight,
   }));

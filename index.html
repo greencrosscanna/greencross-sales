@@ -1418,7 +1418,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.604';
+const APP_VERSION = 'v2.605';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1945,8 +1945,12 @@ async function loadLeaderboardGoals() {
 async function loadPeriodGoals(date) {
   if (!date || periodGoalsCache[date]) return;
   try {
-    const res  = await fetch(`${getProxyUrl()}?action=period_goals&date=${encodeURIComponent(date)}&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    /* SCREEN lane. This re-renders the hero's goal the moment it lands, so it is on-screen work
+       and must not queue behind the day-of-week backfill fired in the same instant. */
+    const data = await gasGate_(GAS_PRIO.SCREEN, async () => {
+      const res = await fetch(`${getProxyUrl()}?action=period_goals&date=${encodeURIComponent(date)}&token=${encodeURIComponent(getToken())}`);
+      return res.json();
+    });
     if (data.ok && data.goals && Object.keys(data.goals).length) {
       periodGoalsCache[date] = data.goals;
       render(); // re-render now that we have accurate per-period DOW targets
@@ -2223,6 +2227,150 @@ function getProxyUrl() {
   return (document.getElementById('proxy-url')?.value || '').trim() || DEFAULT_PROXY;
 }
 
+/* ─── HOW MANY REQUESTS THIS APP MAY HAVE IN FLIGHT AT ONCE, AND WHICH ONES GO FIRST ────────────
+ *
+ * Sky, repeatedly and for weeks: the cold load on a phone is slow. Three previous sessions treated
+ * that as a property of each individual request — the Dutchie hop (v2.592), the /exec stall
+ * (v2.597), the overnight pause (v2.601) — and every one of those diagnoses was right about the
+ * request it looked at. None of them looked at how many requests were in the air at the same time.
+ *
+ * WHAT WAS MEASURED (2026-09-17, headless Chrome at a 390x844 mobile viewport, empty profile so
+ * both the HTTP cache and localStorage are cold, dev-viewer session, local serve.py against the
+ * LIVE backend, CDP Network events rather than Resource Timing — Resource Timing only publishes an
+ * entry once a request COMPLETES, so it cannot see the in-flight set at all):
+ *
+ *   35 backend requests · peak 19 SIMULTANEOUS · last one finished at 47.1s
+ *   NINETEEN of the 35 started inside the first 500ms. The boot fires the whole wave at once.
+ *
+ * THE CONTROLLED COMPARISON IS INSIDE THAT ONE LOAD, which is why it is worth more than a stall
+ * rate. The same routes were fetched twice, once inside the 19-wide burst and once outside it:
+ *
+ *   GX Core `config`           8.36s at 19-wide   ->  2.23s at 2-wide
+ *   GX Core `published_goals`  8.23s at 19-wide   ->  2.90s at 2-wide
+ *   a store's SETTLED month    7.4-8.0s at 19-wide -> 2.35s / 3.44s on the retry at 2-wide
+ *   a store's whole YEAR       (never in the burst)   2.04-2.46s at 8-wide
+ *
+ * The last row is the one that settles it: a whole-YEAR pull — 243 days of rows, strictly more
+ * work than a single month — came back in 2.2s at 8-wide while a single MONTH took 7.5s at
+ * 19-wide. The requests did not get slower; the queue in front of them got longer. Every GX app
+ * and trigger in the suite runs as one Google account with a cap of 30 SIMULTANEOUS EXECUTIONS,
+ * and one phone opening Sales was taking 19 of them in a single instant.
+ *
+ * AND IT PAID FOR THAT TWICE, because the congestion pushed ordinary requests past this app's own
+ * measured ceilings: three settled halves hit the 8s first cap and retried, one live half hit 12s
+ * and retried, and cogs_dutchie burned its whole 25s. Those retries are more load. The ceilings in
+ * PHASE_CAPS_ below are correct and are NOT touched here — they were measured against an
+ * uncongested endpoint, and this is what stops the app manufacturing the congestion that makes
+ * them fire.
+ *
+ * WHY NOT SIMPLY "FEWER LANES". SPIFF runs PULL_LANES = 2 over 6 calls of ~9s each. Sales has ~31
+ * of ~2.5s each, so two lanes would serialize this load into ~45 seconds and make the GOOD case
+ * far worse than the 9.5s it can already achieve. The number below is chosen from the measurement
+ * above, not copied from another app — see GAS_MAX_INFLIGHT.
+ *
+ * WHY NOT SIMPLY "FEWER REQUESTS". Already answered, in CLAUDE.md's 40%-day section, by
+ * computation: at a 40% per-request stall rate a 12-request load carries a stall 99.8% of the time
+ * and a 6-request load 95.3%. Cutting the COUNT does not rescue a bad morning. Cutting the
+ * simultaneous WIDTH is a different lever and is the one this app was pulling in the wrong
+ * direction.
+ */
+const GAS_MAX_INFLIGHT = 8;
+/* WHY 8, FROM THE MEASUREMENT ABOVE AND NOT FROM TASTE.
+ *
+ * The upper bound is where the queueing starts: 19-wide costs 7.5-8.4s a request, 8-wide costs
+ * 2.0-2.5s for a strictly larger request, and 2-wide costs 2.2-2.9s. Eight is the widest point
+ * that was actually OBSERVED behaving like an uncongested endpoint in this load; going wider is
+ * extrapolating into the band where the only data says 7.5s.
+ *
+ * The lower bound is the first paint, and it is the half that stops this becoming SPIFF's number.
+ * 16 of the 19 requests in the opening wave are things the first screen genuinely needs (see the
+ * lane table). At ~2.5s each that is ceil(16/N) waves: N=8 is two waves, N=6 is three, N=4 is
+ * four. Two waves is the cheapest whole number that does not lengthen the good case, and the
+ * critical path is a store's LIVE half anyway, which is slower than the aux calls beside it.
+ *
+ * The suite-wide argument points the same way and is the reason not to split the difference at 12:
+ * the 30-execution ceiling is SHARED with Inventory, the Leaderboard kiosk and every trigger, so
+ * Sales holding 19 of it is antisocial even on a load Sales itself finds fast. Eight leaves
+ * two-thirds of the ceiling for everyone else.
+ *
+ * MEASURE BEFORE CHANGING THIS. The instrument is a cold browser load with CDP Network events, not
+ * a stall probe: tools/exec_stall_probe.py fires a fixed six at a time and therefore cannot see
+ * this effect at all. */
+const GAS_PRIO = Object.freeze({
+  /* SCREEN — the first paint waits on it. The twelve store halves, the goal range, the store
+   * registry, the budget/leaderboard goal fallbacks (all three goal sources are read on the same
+   * frame, in precedence order, so all three are first-paint data), today's other revenue (the
+   * hero folds ATM and sublet into net sales), and the day-scoped pace/period-goal pair that
+   * re-renders the hero once the stores land. This is the DEFAULT: a call site that says nothing
+   * behaves exactly as it did before this queue existed, so forgetting an annotation cannot
+   * silently starve a new route. */
+  SCREEN:     0,
+  /* SECONDARY — on screen, but not the headline. Gross Profit / margin (cogs_dutchie), which is
+   * the most expensive route in the app and fills one card. */
+  SECONDARY:  1,
+  /* BACKGROUND — nothing visible is waiting. The day-of-week history backfill. It already had its
+   * own pool of 4; what it did not have was a reason to lose a race against the pace line. */
+  BACKGROUND: 2,
+});
+/* A SLOT IS NEVER LOST FOREVER. The release is a deadline as well as a call, for the same reason
+ * `_serverBypassUntil` is a timestamp rather than a flag and `bugMailOnce_` fails open: a lane that
+ * depends on somebody remembering to give it back is a lane that eventually is not given back, and
+ * a permanently narrowed queue is strictly worse than never having had one. 90s is far above the
+ * longest legitimate holder (a live half's 25s second attempt) and far below anything a reader
+ * would sit through. */
+const GAS_SLOT_MAX_MS = 90000;
+let _gasInflight = 0;
+let _gasSeq = 0;
+const _gasQueue = [];
+
+/* Strict priority, FIFO within a priority. Picked by a scan rather than by sorting the array,
+ * because the array is short and a sort would have to be stable to keep the FIFO half true. */
+function _gasPump() {
+  while (_gasInflight < GAS_MAX_INFLIGHT && _gasQueue.length) {
+    let best = 0;
+    for (let i = 1; i < _gasQueue.length; i++) {
+      const a = _gasQueue[i], b = _gasQueue[best];
+      if (a.prio < b.prio || (a.prio === b.prio && a.seq < b.seq)) best = i;
+    }
+    _gasInflight++;
+    _gasQueue.splice(best, 1)[0].go();
+  }
+}
+
+/** Wait for a lane. Resolves to a one-shot release function. */
+function gasSlot_(prio) {
+  return new Promise(resolve => {
+    _gasQueue.push({
+      prio: Number(prio) || 0,
+      seq: _gasSeq++,
+      go: () => {
+        let done = false, wd = null;
+        const release = () => {
+          if (done) return;
+          done = true;
+          if (wd) clearTimeout(wd);
+          _gasInflight--;
+          _gasPump();
+        };
+        wd = setTimeout(() => {
+          console.warn('[gasq] a slot was held past ' + GAS_SLOT_MAX_MS + 'ms — releasing it');
+          release();
+        }, GAS_SLOT_MAX_MS);
+        resolve(release);
+      },
+    });
+    _gasPump();
+  });
+}
+
+/** Run `fn` inside one lane. For the call sites that do their own bounded fetch rather than going
+ *  through gasFetchJson. ONLY EVER WRAP SOMETHING THAT IS BOUNDED — an unbounded request inside a
+ *  bounded pool is how a lane is lost; the watchdog above is a backstop, not a licence. */
+async function gasGate_(prio, fn) {
+  const release = await gasSlot_(prio);
+  try { return await fn(); } finally { release(); }
+}
+
 /**
  * One GET to this app's Apps Script /exec, parsed as JSON, WITH the retry that endpoint requires.
  *
@@ -2241,7 +2389,7 @@ function getProxyUrl() {
  * write — and re-sending it would be both wrong and, on a write, a way to duplicate it. Only a
  * failure to obtain a parseable body is retried.
  */
-async function gasFetchJson(url, attempts, timeoutMs) {
+async function gasFetchJson(url, attempts, timeoutMs, prio) {
   /* THE BUDGET MAY BE PER-ATTEMPT — pass an ARRAY and it sets both the ceiling of each attempt and
    * how many there are (`attempts` is then ignored, so the two can never drift apart).
    *
@@ -2266,7 +2414,19 @@ async function gasFetchJson(url, attempts, timeoutMs) {
   for (let i = 0; i < tries; i++) {
     const cap = caps ? caps[i] : (timeoutMs || 30000);
     const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    /* THE LANE IS TAKEN PER ATTEMPT, NOT PER CALL, and both halves of that matter.
+     *
+     * Per call, a live half holding one lane for 12s + backoff + 25s would block a third of the
+     * queue for 38 seconds while doing nothing — the retry ladder would eat the pool it is
+     * queueing in. Per attempt, a stalled request gives its lane back the moment it is abandoned.
+     *
+     * AND THE CEILING IS ARMED AFTER THE WAIT, NEVER BEFORE IT. Queue time is not attempt time:
+     * PHASE_CAPS_ are measurements of how long a REQUEST may take on the wire, and starting their
+     * clock while the request has not been sent yet would quietly weaken every one of them — which
+     * is exactly the failure this change exists to stop, wearing the opposite hat. */
+    const release = await gasSlot_(prio);
     const timer = ctl ? setTimeout(() => ctl.abort(), cap) : null;
+    let failed = false;
     try {
       const res = await fetch(url, ctl ? { signal: ctl.signal } : undefined);
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -2280,11 +2440,15 @@ async function gasFetchJson(url, attempts, timeoutMs) {
       }
     } catch (e) {
       lastErr = e.name === 'AbortError' ? new Error('timed out after ' + cap + 'ms') : e;
-      // Jittered, so six stores retrying at once do not re-collide on the same second.
-      if (i < tries - 1) await new Promise(r => setTimeout(r, 700 * (i + 1) + Math.random() * 500));
+      failed = true;
     } finally {
       if (timer) clearTimeout(timer);
+      release();
     }
+    // Jittered, so six stores retrying at once do not re-collide on the same second. OUTSIDE the
+    // lane: a request that is sleeping is not a request that is in flight, and holding the slot
+    // through the backoff would idle it for a second per retry across the whole pool.
+    if (failed && i < tries - 1) await new Promise(r => setTimeout(r, 700 * (i + 1) + Math.random() * 500));
   }
   throw lastErr || new Error('request failed');
 }
@@ -3248,8 +3412,15 @@ async function backfillDailyHistory(proxyUrl) {
        * "because the next period change will ask again anyway" — true when a lost task cost one
        * month of one store, and no longer true now that it costs that store's whole year of bars.
        * The retry does not widen the load: the pool still caps inflight requests at 4, and the
-       * worst case here is 12 requests where it used to be 48. */
-      const d = await gasFetchJson(url, 2, 15000);
+       * worst case here is 12 requests where it used to be 48.
+       *
+       * BACKGROUND lane. The pool of 4 was always a promise this work would lose every race
+       * against the load the reader is waiting on, and it could not keep it: a pool bounds how
+       * many of THESE run, not whether they run ahead of the pace line and the period goal, which
+       * are the two on-screen calls fired in the same instant. Measured 2026-09-17, those two and
+       * cogs_dutchie went out alongside four year-pulls and cogs_dutchie burned its whole 25s
+       * ceiling. The lane is what makes the promise true. */
+      const d = await gasFetchJson(url, 2, 15000, GAS_PRIO.BACKGROUND);
       if (!d || d.error) return;
       mergeDailyData(store.name, d.daily);
       /* Keep the whole span, not just what this answer carried: months that came out of the month
@@ -3700,7 +3871,16 @@ async function loadAllStores() {
   if (!_userScrolled && window.scrollY !== _scrollY) window.scrollTo(0, _scrollY);
   scheduleAutoRefresh();          // restart 60s timer for current month
   backfillDailyHistory(proxyUrl);
-  loadVelocity(); // inventory loads last — lowest priority
+  /* loadVelocity() USED TO BE HERE, and it was paid by every load and read by the INVENTORY TAB
+   * ONLY — the exact sentence that moved expbudgets/expenses off this line on v2.571, still true
+   * one call further down. Its own comment said "inventory loads last — lowest priority" while it
+   * was being fired on every boot by everyone who never opens that tab; fire-and-forget makes a
+   * call invisible, not weightless.
+   *
+   * Nothing had to be built to replace it: renderInventory() already asks for velocity when the
+   * tab is first drawn, guarded by TRIED-NOT-LOADING (`_velocityTriedAt`, re-asked at most every 5
+   * minutes after a failure) — the same shape as ensureExpBudgets, and for the same reason. No
+   * other code path reads `velocityData`; the Critical tile is its only consumer. */
   loadInvGmData().then(() => { if (section === 'income') renderIncome(); });
   /* Today is ALREADY the selection by the time any of this runs (selectDefaultPeriod_, called in
    * the init block before the first paint). What is left here is the pair of day-scoped loads the
@@ -6162,8 +6342,13 @@ async function loadOtherRevenue() {
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
   try {
-    const res  = await fetch(`${proxyUrl}?action=otherrev&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    /* SCREEN lane — the hero folds ATM and sublet into net sales, so this IS first-paint data and
+       is deliberately NOT demoted. It is in the queue so that the cap means what it says: a
+       request outside the pool is a request the pool cannot count. */
+    const data = await gasGate_(GAS_PRIO.SCREEN, async () => {
+      const res = await fetch(`${proxyUrl}?action=otherrev&token=${encodeURIComponent(getToken())}`);
+      return res.json();
+    });
     if (data.error) throw new Error(data.error);
     otherRevData = data;
     otherRevAgeMs = null;
@@ -6466,11 +6651,21 @@ async function loadInvGmData() {
   if (!proxyUrl) return;
   _invGmLoading = true;
   try {
+    /* SECONDARY lane, and the ceiling is armed INSIDE it. This is the most expensive route in the
+       app and it fills one card — Gross Profit / margin — so it must not be in front of anything
+       the headline waits on. Arming the 25s abort before the queue wait would spend the card's
+       whole budget standing in line, which is the mistake gasFetchJson avoids the same way. */
     const ac  = new AbortController();
-    const tid = setTimeout(() => ac.abort(), 25000);
-    const res = await fetch(`${proxyUrl}?action=cogs_dutchie&from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`, { signal: ac.signal });
+    let tid = null;
+    const data = await gasGate_(GAS_PRIO.SECONDARY, async () => {
+      tid = setTimeout(() => ac.abort(), 25000);
+      const res = await fetch(`${proxyUrl}?action=cogs_dutchie&from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`, { signal: ac.signal });
+      // The body read is INSIDE the lane too. A lane given back while the response is still
+      // downloading is a lane that is not actually free — this is the biggest payload the app
+      // fetches, and it is the one where that would be measurable.
+      return res.json();
+    });
     clearTimeout(tid);
-    const data = await res.json();
     if (data.error) throw new Error(data.error);
     const cogs = {}, byDay = {}, byMonth = {};
     for (const row of data.data || []) {

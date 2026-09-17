@@ -38,6 +38,26 @@ function grab(name) {
   return SRC.slice(m.index, j + 1);
 }
 
+/* THE REQUEST QUEUE IS STUBBED OUT IN THIS FILE, DELIBERATELY.
+ *
+ * gasFetchJson takes a lane from gasSlot_ before each attempt (see GAS_MAX_INFLIGHT in
+ * index.html). The contexts below fake setTimeout so that EVERY timer fires the instant it is
+ * armed — which is what makes the retry-ladder assertions deterministic, and which would also fire
+ * the queue's 90-second stuck-slot watchdog before the request it is guarding had started. The
+ * in-flight count would then drift and these assertions would be measuring the fake, not the
+ * ladder.
+ *
+ * So the lane is a no-op here and the queue has its own suite (tests/boot_concurrency_test.js),
+ * which executes the real gasSlot_/_gasPump against a real clock. This file keeps its subject: how
+ * many attempts, at which ceilings, in what order. Splitting them is what keeps either readable.
+ *
+ * It is a stub of a REAL function, so it still proves gasFetchJson CALLS one — delete gasSlot_ from
+ * index.html and the app breaks while this file keeps passing, which is exactly why the other suite
+ * asserts the call site rather than this one. */
+function gasQueueStub() {
+  return 'function gasSlot_() { return Promise.resolve(function () {}); }';
+}
+
 /** Code with comments removed. Several of these functions describe the very pattern they must not
  *  contain, and a test that reads prose as code fails the correct implementation for documenting
  *  itself — which teaches the next person to delete the explanation. */
@@ -125,7 +145,7 @@ function runFetchCase(responses) {
     },
   };
   vm.createContext(ctx);
-  vm.runInContext(grab('gasFetchJson'), ctx);
+  vm.runInContext(gasQueueStub() + '\n' + grab('gasFetchJson'), ctx);
   return { calls, run: ctx.gasFetchJson('https://example.test/exec?action=x', 3) };
 }
 
@@ -226,7 +246,7 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
       },
     };
     vm.createContext(ctx);
-    vm.runInContext(grab('gasFetchJson'), ctx);
+    vm.runInContext(gasQueueStub() + '\n' + grab('gasFetchJson'), ctx);
     let msg = null;
     try { await ctx.gasFetchJson('https://example.test/exec', 2, 1000); }
     catch (e) { msg = e.message; }
@@ -267,7 +287,7 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
       },
     };
     vm.createContext(ctx);
-    vm.runInContext(grab('gasFetchJson'), ctx);
+    vm.runInContext(gasQueueStub() + '\n' + grab('gasFetchJson'), ctx);
 
     try { await ctx.gasFetchJson('https://example.test/exec', null, [10000, 14000, 20000]); } catch (e) {}
     // Abort timers are armed at attempt start; the backoff timer sits between two of them.

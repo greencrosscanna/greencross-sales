@@ -23,3 +23,11 @@ design_handoff_*/
 # gets run plainly. Scratch only; anything worth keeping moves up to scripts/ and is committed.
 scripts/tmp/*
 !scripts/tmp/.gitkeep
+
+# Raw /exec stall-probe runs, written by the twice-daily scheduled task. Ignored so an
+# accumulating log never makes the tree dirty — gx-preflight switches to testing HEAD the
+# moment `git status` is non-empty, so a stray file here would quietly change what every
+# push in this repo verifies. A run worth keeping gets committed DELIBERATELY, next to the
+# entry in CLAUDE.md that cites it.
+tools/stall-log/*
+!tools/stall-log/README.md

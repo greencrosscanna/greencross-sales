@@ -345,10 +345,19 @@ section('7. the boot wave', () => {
   ok('expbudgets is still off the boot path (v2.571 — do not let it back)',
      !/loadExpBudgets\(\)/.test(load));
 
-  // The three bare-fetch loaders on the boot path take a lane, or the cap is a number that is not
-  // true: a request outside the pool is a request the pool cannot count.
-  ok('otherrev goes through the queue', /gasGate_\(GAS_PRIO\.SCREEN/.test(grab('loadOtherRevenue')));
-  ok('period_goals goes through the queue', /gasGate_\(GAS_PRIO\.SCREEN/.test(grab('loadPeriodGoals')));
+  /* The three bare-fetch loaders on the boot path take a lane, or the cap is a number that is not
+     true: a request outside the pool is a request the pool cannot count.
+     EITHER ROUTE COUNTS, and that is the fix rather than a loosening. These two used to wrap a bare
+     fetch in gasGate_; v2.608 bounded them, and gasFetchJson takes a lane PER ATTEMPT of its own —
+     so keeping the gate would have held one lane while queueing for a second, which is the deadlock
+     shape this very section exists to prevent. What must stay true is that the call takes a SCREEN
+     lane, not which function it asks for one with. bounded_fetch_test §4 fails if the gate ever
+     comes back around a gasFetchJson. */
+  const takesScreenLane = fnSrc =>
+    /gasGate_\(GAS_PRIO\.SCREEN/.test(fnSrc) ||
+    /gasFetchJson\([\s\S]*?GAS_PRIO\.SCREEN/.test(fnSrc);
+  ok('otherrev takes a SCREEN lane', takesScreenLane(grab('loadOtherRevenue')));
+  ok('period_goals takes a SCREEN lane', takesScreenLane(grab('loadPeriodGoals')));
   ok('cogs_dutchie goes through the queue, in the SECONDARY lane',
      /gasGate_\(GAS_PRIO\.SECONDARY/.test(grab('loadInvGmData')));
   ok('...and its own 25s ceiling is armed INSIDE the lane, not before it',

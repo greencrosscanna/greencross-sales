@@ -148,11 +148,15 @@ const SECTION_1 = () => section('1. EVERY fetch IN index.html PASSES AN AbortSig
          '\n       or give it its own AbortController if it must stay outside the pool.'
        : '');
 
-  /* The three that legitimately hold a raw fetch, named so the count is a decision rather than
-     whatever the file happens to contain: gasFetchJson itself, the cogs_dutchie call that arms its
-     own ceiling inside a lane, and the login prewarm that is deliberately outside the pool. */
-  ok('exactly three raw fetch sites, the ones this file knows about',
-     sites.length === 3, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
+  /* The four that legitimately hold a raw fetch, named so the count is a DECISION rather than
+     whatever the file happens to contain: gasFetchJson itself; the cogs_dutchie call that arms its
+     own ceiling inside a lane; the login prewarm, outside the pool because a request nobody waits
+     for must not queue ahead of the sign-in behind it; and the session heartbeat, which
+     aux_hang_bounds_test pins as un-retried because its ten-minute interval IS its retry.
+     The last one was briefly converted and that test caught it — a rule this file cannot see on its
+     own, which is the argument for both files existing. */
+  ok('exactly four raw fetch sites, the ones this file knows about',
+     sites.length === 4, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
      ' — a new one is not necessarily wrong, but it is a decision, so say so here.');
 });
 

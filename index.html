@@ -9845,12 +9845,20 @@ function startSalesHeartbeat() {
     if (!session) { salesLogout(); return; }
     try {
       var proxyUrl = (document.getElementById('proxy-url') || {}).value || DEFAULT_PROXY;
-      /* BACKGROUND lane and a ceiling: nothing on screen waits for the heartbeat, and an unbounded
-         one was a request that could sit open for the whole ten minutes until the next one joined
-         it. A missed beat is harmless — the catch below deliberately does not log anyone out. */
-      var data = await gasFetchJson(
-        proxyUrl + '?action=ping&token=' + encodeURIComponent(session.token),
-        null, AUX_READ_CAPS_, GAS_PRIO.BACKGROUND);
+      /* BOUNDED, BUT DELIBERATELY NOT THROUGH gasFetchJson — aux_hang_bounds_test pins this and it
+         is right: THE TEN-MINUTE INTERVAL IS ALREADY THIS CALL'S RETRY, so a retry ladder here
+         would re-ask a question that is about to be asked again anyway, and a lane taken for it is
+         a lane the screen cannot have. What it was missing is only the CEILING: unbounded, one beat
+         could sit open across the whole interval and overlap the next. A missed beat is harmless —
+         the catch below deliberately does not log anyone out. */
+      var beatCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var beatTimer = beatCtl ? setTimeout(function () { beatCtl.abort(); }, 25000) : null;
+      var res;
+      try {
+        res = await fetch(proxyUrl + '?action=ping&token=' + encodeURIComponent(session.token),
+                          beatCtl ? { signal: beatCtl.signal } : undefined);
+      } finally { if (beatTimer) clearTimeout(beatTimer); }
+      var data = await res.json();
       if (data.ok && data.token) {
         GC_SALES_AUTH.save(Object.assign({}, session, { token: data.token, expiresAt: data.expiresAt }));
       } else {

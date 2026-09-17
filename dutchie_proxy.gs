@@ -4166,7 +4166,16 @@ function bugNotify_(o) {
       o.errors.forEach(function (e) { lines.push('  - ' + errText_(e).slice(0, 200)); });
     }
     lines.push('', o.desc || '(no details provided)');
-    MailApp.sendEmail({ to: 'sky@greencrosscanna.com', subject: o.subject, body: lines.join('\n') });
+    /* SCRUBBED AT THE EXIT, not field by field, because MAIL IS AN EXIT AND EXITS ARE WHAT SCRUB.
+       gxScrub_ was wired to every HTTP exit — jsonOut_, the raw output builder, errText_, the two
+       cache paths — and to none of the mail. That is not an oversight about one field; it is a
+       whole exit nobody audited. Two of the values assembled above never passed a scrub on their
+       way here: `mailWhy` (r.mail_error / r.mail_skipped, GX Core's own string) and `o.desc`. The
+       captured JS errors were already safe because errText_ scrubs. Wrapping the finished body and
+       subject covers all of it and, more importantly, covers whatever the next person adds to the
+       block above without thinking about this. */
+    MailApp.sendEmail({ to: 'sky@greencrosscanna.com',
+                        subject: gxScrub_(o.subject), body: gxScrub_(lines.join('\n')) });
   } catch (mailErr) { /* non-fatal, on purpose — see above */ }
 }
 

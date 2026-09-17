@@ -1176,6 +1176,52 @@ mechanism that made it.
   no number is a release nobody can name afterwards — that note had to cite a sha and explain where
   to read it. The cost is one reload of open tabs.
 
+### …and MAIL was an exit nobody had counted (v2.607, 2026-09-17)
+
+The section above counts **54 reply exits** and wires every one of them to a scrub. It counts **zero
+mail exits**, because nobody looked — and this app has one. `bugNotify_`
+(`dutchie_proxy.gs`, the unfiled-bug notice) built its body from values that had never met
+`gxScrub_` and handed it to `MailApp.sendEmail`. Now scrubbed, subject and body, **at the exit
+rather than field by field** — so whatever the next person adds to that block is covered without
+their having to know this.
+
+What was actually exposed, since "mail leaks" deserves a real answer rather than a shrug: **`mailWhy`
+(`r.mail_error` / `r.mail_skipped` — GX Core's own error string, the same class of text that
+`gxDutchieGet_` re-throws verbatim and that the anchoring fix above was written for) and the
+reporter's `desc`.** The captured JS errors were already safe — they go through `errText_`, which
+scrubs. The page URL arrives cleaner too since gx-theme's bug reporter was fixed the same night, but
+that is a second app's fix protecting this one, which is not a property to rely on.
+
+**Two things the next session must NOT conclude from this.**
+
+- **Not "Sales is done because the send scrubs now."** The rule is that **every exit an engine has**
+  goes through a scrubbing builder — replies AND mail AND anything stringified into a Script
+  Property, a sheet or a cache that something later replays. One more exit is closed; the class is
+  not. **A shared TEST is what will hold it** — count the `ContentService` and `MailApp` exits in an
+  engine and require each to route through a scrubbing builder. **That is the hub's to write, in
+  gx-theme's shared set and wrapped into each spoke's push gate the way
+  `tests/cross_app_goals_contract_test.js` already is.** Deliberately NOT written locally here: six
+  sessions inventing six spellings of one rule is the thing the shared test exists to stop. As of
+  2026-09-17 it is not started and is on Sky's board.
+- **Not "a field with no reader is safe."** Crew found a stored error field with no known reader,
+  went looking, and found one: a health check folds it into a `reason` that the Monday recap then
+  renders into an email. **The rule is about exits, not about which fields look inert.**
+
+**Why the fix is local and one line rather than shared code.** `MailApp` is server-side in each
+spoke's own Apps Script project, so **gx-theme cannot host it** — gx-theme is browser-side. The only
+shared home is GX Core's library surface, and **a `GXCore.x()` call runs the version the SPOKE
+pins**, so a scrub fix there protects nobody until seven spokes re-pin. For something this size that
+is a worse property than a wrap at the one send. The suite-wide half is the test, not the code.
+
+Crew is the proof that shared code was never the missing piece: it **had** a correct, tested,
+derived scrub and still had **seven mail sends with one scrubbed**. What fixed Crew was routing
+every send through one `sendMail_`, the same argument as its single reply builder. Price Cards is
+the same story inverted — its scrub is fine and its two queue-digest sends carry no error text at
+all, so their lack of a scrub is correct rather than missed. Counted by the hub, 2026-09-17.
+
+**Version bumped for a backend-only change**, per the rule the section above learned the hard way: a
+ship with no number is a release nobody can name afterwards.
+
 ### The screenshot died one line short of the board (v2.598, 2026-09-15)
 
 Filed by core-admin, measured live: **140 bug reports across all seven apps, not one with a

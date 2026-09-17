@@ -146,6 +146,16 @@ let salesDailyFail = {};   // dutchie store name → message to throw from GXCor
 const cacheStore = new Map();
 let puts = [];             // every cacheSet_ that actually reached the cache
 
+/* Lifted from index.html rather than retyped: the queue's constants and its two functions are
+   the app's, and a copy here would be a second implementation that can pass while the real one is
+   broken. Slice runs from the first declaration to gasFetchJson, which sits immediately after it. */
+function gasQueueDecls() {
+  const a = HTML.indexOf('const GAS_MAX_INFLIGHT');
+  const b = HTML.indexOf('async function gasFetchJson');
+  if (a < 0 || b < 0 || b < a) throw new Error('the request queue moved — re-anchor gasQueueDecls()');
+  return HTML.slice(a, b);
+}
+
 const HTMLBOUNCE = '<!DOCTYPE html><html><body>Sorry, unable to open the file at this time.</body></html>';
 const bounce = ms => ({ ms, body: HTMLBOUNCE });
 const refuse = (ms, msg) => ({ ms, body: JSON.stringify({ ok: false, error: msg }) });
@@ -530,7 +540,12 @@ console.log('\n12. the tab never stores a partial, and never trusts an old entry
     fetch: async () => { fetched++; return { json: async () => payload }; },
   };
   vm.createContext(lctx);
-  vm.runInContext(html('loadInvGmData'), lctx);
+  /* THE REAL REQUEST QUEUE, not a stub. loadInvGmData now takes a SECONDARY lane before it fires
+     (see GAS_MAX_INFLIGHT in index.html), so lifting the real gasSlot_/gasGate_ is what keeps this
+     section executing the shipped function rather than a rewrite of it — and it is also what
+     proves the gate cannot swallow the answer. lctx's setTimeout is a no-op, which is correct
+     here: the 90s stuck-slot watchdog must not fire during a test that resolves immediately. */
+  vm.runInContext(gasQueueDecls() + '\n' + html('loadInvGmData'), lctx);
 
   const ROWS = [{ date: YDAY, store: 'Bend', cogs: 10 }, { date: YDAY, store: 'River', cogs: 20 }];
 

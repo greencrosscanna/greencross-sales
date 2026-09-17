@@ -562,6 +562,56 @@ again: a per-store failure degrading into a smaller number instead of a message.
 - `tests/hero_live_state_test.js` — 26 assertions, executes the shipped builder; all seven guards
   mutation-verified, each target asserted present first so no mutation was vacuous.
 
+### …and whether it has finished ADDING THEM UP (2026-09-17)
+
+Sky compared Sales' net sales against Leaderboard's and they disagreed. **Both backends were
+right** — Sales showed River $855, Leaderboard's `storetoday` returned $854.81. What he read was
+the headline MID-ASSEMBLY: `loadAllStores` paints after every store settles, so until the last one
+lands the hero is the sum of however many have arrived. *"They eventually updated correctly after a
+few minutes."* The v2.605 concurrency cap widened that window — capping the wave at 8 lands the last
+stores later than 19 did — which made a pre-existing silence visible rather than creating it.
+
+The rows already said it (`storeNotCurrent_` blinks their dots) and the hero already said it for a
+FAILED store and for a missing TODAY. The one case with no signal was the one in front of him: a
+store not added in **yet**.
+
+- **It is not net sales, it is every figure in the hero.** `getPeriodTotals` skips a store it has no
+  entry for, so net, gross, transactions and discounts all understate together, AOV is derived from
+  two of them and COGS sums the same way. So the statement is made ONCE where the hero is assembled
+  (`_heroLiveHtml_`, the same line and the same amber the today-pending case uses) and is not bolted
+  onto one number.
+- **`storeNotCurrent_` is reused but NOT verbatim, and the difference is the whole design.** That
+  predicate is the one definition of *this STORE's figure is not current*, and it is right for the
+  dot. *Is this TOTAL whole* is a different question: a re-poll deliberately keeps `liveData` and
+  re-asks, so all six stores are `loading` while the total on screen still contains all six.
+  Reusing the predicate as-is would brand every 60-second refresh incomplete when nothing is
+  missing from it. A store is missing from the TOTAL when it has no `liveData` entry — exactly what
+  `getPeriodTotals` skips — so the fact is composed out of what already exists rather than
+  redefined. **Cold load and period change report; the poll does not.** That is also the answer to
+  "does it cover the boot case as well as the re-poll case": it covers the boot case, which is the
+  one Sky hit, and deliberately not the other.
+- **A COUNT, `4/6 stores so far`**, in the same vocabulary the red branch already uses for the worse
+  case; "so far" is what separates a transient from that branch's verdict. **No time threshold, and
+  that is a decision, not an omission**: a threshold needs a repaint timer, because nothing
+  re-renders between two stores landing — so its failure mode is staying silent through exactly the
+  long stall it was added for. The STATE is the threshold, since it exists only while the sum is
+  genuinely short.
+- **Counted against `getActiveStores()`**, not all six: a filtered headline sums the stores it
+  shows, and `4/6` under a one-store filter describes a number nobody is looking at. *Finding, not
+  fixed here: the v2.600 `err` and today-pending branches still count against all six `STORES`, so a
+  filtered view can be told about a store it is not showing. Left alone deliberately — it is a
+  48-hour-old guard and changing it is not this fix.*
+- **Nothing is claimed until a store has landed anywhere.** An amber "short" light over a shimmering
+  hero answers a question nobody has asked — the `$0` hero error again.
+- **The number is never hidden or blanked.** A missing headline is worse than a labeled partial one.
+- `tests/hero_partial_total_test.js` — 34 assertions, EXECUTES the shipped `_heroLiveHtml_`,
+  `getActiveStores` and `getPeriodTotals`. **Measured against `HEAD:index.html`: 27 pass, 7 fail**,
+  and the sections that pass there are named in the file, because a test where everything fails
+  proves nothing about the guards it had to leave standing. Eight mutations, counts measured.
+  `hero_live_state_test.js`'s fixture gained two bindings (the builder reads two more facts) with
+  every assertion unchanged at 26; three of its own mutation-log entries were re-run to prove it
+  still bites.
+
 **The durable lesson is about DIAGNOSIS, not the dot.** Three "it's slow" reports in five days
 resolved to three different causes, and each cost a round trip to Sky to tell apart. The phone —
 the only device any of them came from — could not say which stores were short. **An app that cannot

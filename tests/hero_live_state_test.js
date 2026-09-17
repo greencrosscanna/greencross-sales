@@ -37,17 +37,28 @@ function ok(label, cond) { if (cond) { pass++; console.log('  PASS ' + label); }
 const TODAY = '2026-09-16';
 const SIX = ['Bend', 'Center', 'Commercial', 'Hillsboro', 'Portland Rd', 'River'];
 
-function heroCtx({ state = {}, todayPending = [], range = { from: '2026-09-01', to: TODAY } } = {}) {
+/* `landed` is the set of stores whose figures are actually IN the total — liveData's own keys.
+ * A third thing this builder reports was added 2026-09-17 (the total is still being ASSEMBLED, see
+ * tests/hero_partial_total_test.js), and it reads that fact off liveData and the store filter
+ * rather than off a second definition of "not current". So the context has to carry both. Every
+ * assertion below is unchanged: these fixtures are all complete totals, where the new branch is
+ * silent by construction — except §6, which is the cold boot and passes `landed: []`. */
+function heroCtx({ state = {}, todayPending = [], landed = SIX,
+                   range = { from: '2026-09-01', to: TODAY } } = {}) {
   const ctx = {
     STORES: SIX.map(n => ({ name: n, display: n })),
     _storeStateMap: state,
     _todayPending: new Set(todayPending),
+    liveData: Object.fromEntries(landed.map(n => [n, { netSales: 1000 }])),
+    activeStore: 'All',
+    activeStoreSet: null,
     laDay: () => TODAY,
     periodRange: () => ({ from: range.from, to: range.to }),
     toDateStr: d => d,
   };
   vm.createContext(ctx);
-  vm.runInContext([grab('viewIncludesToday_'), grab('_heroLiveHtml_')].join('\n'), ctx);
+  vm.runInContext([grab('viewIncludesToday_'), grab('getActiveStores'),
+                   grab('_heroLiveHtml_')].join('\n'), ctx);
   return ctx;
 }
 
@@ -109,7 +120,7 @@ console.log('\n6. the FIRST load must not claim the total is short');
   // Nothing has answered yet: every store is 'loading', nothing is today-pending. The hero shimmers
   // on its own (dataWait); an amber "short" light over a shimmer would be an answer to a question
   // nobody has asked yet — the same error as the $0 hero first_load_state_test.js pins.
-  const c = heroCtx({ state: Object.fromEntries(SIX.map(n => [n, 'loading'])) });
+  const c = heroCtx({ state: Object.fromEntries(SIX.map(n => [n, 'loading'])), landed: [] });
   const h = c._heroLiveHtml_('14:32', '');
   ok('a load in flight is not reported as missing stores', !/pending|\/6 stores/.test(h));
   ok('and the light is not red', !/failed/.test(h));

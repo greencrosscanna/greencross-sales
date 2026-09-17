@@ -655,6 +655,66 @@ store falls to the next 60s poll.
 Browser, cold, live backend (proxy change not yet deployed): fast stores' today at ~7s; three hit
 28s and their retries answered in ~6s; last store 36s — where v2.591 would have fallen to the poll.
 
+## …and twenty-one OTHER calls had no ceiling at all (v2.608, 2026-09-17)
+
+The ladder below was built for the twelve store halves and given to nothing else. **Twenty-one of
+this app's twenty-three `fetch` call sites were bare** — expenses, expense budgets, other revenue,
+revenue detail, the expense breakdown, P&L, inventory, every reconcile write, the whole smart-budget
+planner, the leaderboard-goal fallback, and the ten-minute session heartbeat. **A browser `fetch`
+has no timeout.** Against a hop that stalls ~3.4% of the time six-wide, a bare one does not fail —
+it never returns. The `catch` never runs, the card never fills, the spinner spins until the tab is
+closed. The River shape, twenty-one more times.
+
+`tests/aux_hang_bounds_test.js` already had the *reason* exactly right — a hung promise is not a
+rejected one, so `finally` never runs and `_paceFracsInFlight` latches for the life of the tab. It
+pinned the four calls inside `auxDataPromise` and `loadPaceFracs`. **What it could not do is stop
+the twenty-second bare fetch being added**, because it names call sites. The new file pins the
+PROPERTY.
+
+- **Reads get `AUX_READ_CAPS_`, which IS `LIVE_PHASE_CAPS_`** — `[12000, 25000]`, the same numbers,
+  because it is the same hop and the same endpoint, and a read costs nothing to re-ask. The test
+  asserts the two are equal rather than re-typing the numbers, so a re-tune of one cannot silently
+  leave the other behind.
+- **Writes get `WRITE_CAPS_` = `[25000]` — ONE attempt, and this is the whole design.** An abandoned
+  request *keeps running to completion on Apps Script*; that is exactly why attempt two of a store
+  half is a cheap cache read rather than a second pull. The same fact makes a retried WRITE a second
+  write, because the client cannot tell a timeout from a success. So a write is bounded and then
+  REPORTED, never re-sent. `reconPost` is the one that mattered most — every reconcile write funnels
+  through it, and a re-sent `set_recon_*` is a second write of a figure somebody is reconciling
+  against.
+- **Two call sites were already inside `gasGate_`** (`loadPeriodGoals`, `loadOtherRevenue`) and could
+  not simply have their `fetch` swapped: **`gasFetchJson` takes a pool lane per ATTEMPT**, so the
+  gate would have held one lane while queueing for a second. With eight lanes, the holders are the
+  waiters. Both now pass their priority INTO `gasFetchJson` and the gate is gone. `gasGate_` remains
+  correct for its one real user — `cogs_dutchie`, which arms its own ceiling inside the lane.
+- **The login prewarm is the one deliberate exception.** It stays a raw `fetch` with its own 15s
+  abort: taking a lane would put a request nobody waits for in front of the sign-in behind it, and
+  `gasFetchJson` parses a body that call throws away. Bounded, but outside the pool, and the test
+  knows about it by name.
+- **Reconcile's deposit load keeps its own 75s budget** — it crosses to GX Core, which has a 60s
+  budget underneath it. Not covered by either constant.
+
+`tests/bounded_fetch_test.js` — **13 assertions, three guards, each verified by mutation:** against
+`main` it names all twenty-one bare sites by line; a `gasFetchJson` re-nested inside a `gasGate_`
+fails §4 naming the line; `WRITE_CAPS_` given a second element fails §2. §3 EXECUTES the shipped
+`gasFetchJson` and counts requests on the wire — one for a one-element ladder, two for a
+two-element one, so the no-retry guarantee is a measured count and not a comment.
+
+*Two bugs in the checker itself, both of which made it pass wrongly and are worth keeping.* It first
+reported a bare fetch at a `console.warn` whose TEXT contains "Leaderboard fetch (GX Core…" — a
+checker that cannot tell code from prose reports the wrong line and would accept a real bare fetch
+hidden the same way. The fix after that was worse: whole-file quote-pairing blanked enormous regions
+because one apostrophe in HTML prose pairs with a quote thousands of lines away, taking the fetch
+count from 4 to 1 and the `gasGate_` count to 0 — **both checks quietly passing themselves into
+uselessness.** It is line-local now. And the first run printed its summary before its async section
+had finished, reporting "7 passed, 2 failed" above four later PASSes.
+
+*One more correction to a number this file has now had wrong twice.* **Twenty-one sites were bare,
+not nineteen.** A first grep said 21, the hub's independent count said 19 of 23, and that number was
+taken over the measurement — the shipped checker lists all twenty-one by line against `main`, and
+only two of the twenty-three (`gasFetchJson` itself and `cogs_dutchie`) ever had a signal. A peer's
+count is evidence, not an override.
+
 ## ~4% of /exec requests just don't come back — and the ceiling decided what that cost (v2.597)
 
 Sky, 2026-09-15, on v2.596: *"still taking 60+sec to load on mobile."* Same sentence as v2.592,

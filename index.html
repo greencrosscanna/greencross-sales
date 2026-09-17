@@ -1420,7 +1420,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.607';
+const APP_VERSION = 'v2.608';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1890,7 +1890,7 @@ async function fetchLeaderboardGoalsDirect() {
       // a silent miss here is what strands us on the hardcoded fallback below.
       const cfg = (typeof GXClient !== 'undefined')
         ? await GXClient(GXCORE).jsonp('config', { key: 'lbGoals' })
-        : await (await fetch(`${GXCORE}?action=config&key=lbGoals`)).json();
+        : await gasFetchJson(`${GXCORE}?action=config&key=lbGoals`, null, AUX_READ_CAPS_);
       if (cfg && cfg.ok && cfg.value) {
         LEADERBOARD_GAS = cfg.value;
         localStorage.setItem(LB_URL_KEY, JSON.stringify({ v: cfg.value, ts: Date.now() }));
@@ -1898,8 +1898,7 @@ async function fetchLeaderboardGoalsDirect() {
     }
   } catch(e) { /* use hardcoded fallback */ }
 
-  const res  = await fetch(`${LEADERBOARD_GAS}?action=getdailygoals`);
-  const data = await res.json();
+  const data = await gasFetchJson(`${LEADERBOARD_GAS}?action=getdailygoals`, null, AUX_READ_CAPS_);
   return data && data.stores ? data : null;
 }
 
@@ -1948,11 +1947,14 @@ async function loadPeriodGoals(date) {
   if (!date || periodGoalsCache[date]) return;
   try {
     /* SCREEN lane. This re-renders the hero's goal the moment it lands, so it is on-screen work
-       and must not queue behind the day-of-week backfill fired in the same instant. */
-    const data = await gasGate_(GAS_PRIO.SCREEN, async () => {
-      const res = await fetch(`${getProxyUrl()}?action=period_goals&date=${encodeURIComponent(date)}&token=${encodeURIComponent(getToken())}`);
-      return res.json();
-    });
+       and must not queue behind the day-of-week backfill fired in the same instant.
+       NOT gasGate_ ANY MORE: gasFetchJson takes its own lane per ATTEMPT, so wrapping it in a gate
+       would hold one lane while waiting for a second — eight lanes, and the ones waiting are the
+       ones holding. gasGate_ is for call sites that do their own bounded fetch, which this no
+       longer does; the priority moves into the call instead. */
+    const data = await gasFetchJson(
+      `${getProxyUrl()}?action=period_goals&date=${encodeURIComponent(date)}&token=${encodeURIComponent(getToken())}`,
+      null, AUX_READ_CAPS_, GAS_PRIO.SCREEN);
     if (data.ok && data.goals && Object.keys(data.goals).length) {
       periodGoalsCache[date] = data.goals;
       render(); // re-render now that we have accurate per-period DOW targets
@@ -2517,6 +2519,39 @@ async function gasFetchJson(url, attempts, timeoutMs, prio) {
  * not re-try a timeout) and drops it out of the company total. */
 const LIVE_PHASE_CAPS_    = [12000, 25000];
 const SETTLED_PHASE_CAPS_ = [8000, 12000, 16000];
+
+/* ─── AND EVERY OTHER CALL TO THE SAME ENDPOINT GETS A CEILING TOO ────────────────────────────────
+ *
+ * The two ladders above covered the twelve store halves and nothing else. Nineteen other call
+ * sites — expenses, budgets, other revenue, P&L, inventory, reconcile, the smart-budget planner,
+ * the session heartbeat — were BARE `fetch`, which in a browser has no timeout at all. A stalled
+ * /exec (measured 2026-09-15 at 3.4% six-wide; see the v2.597 section of CLAUDE.md) does not fail
+ * there, it simply never comes back: the spinner spins, the `catch` never runs, and the card sits
+ * empty with no error for as long as the tab is open. That is the River shape one more time — a
+ * failure that reads as "still working" instead of "gave up".
+ *
+ * THE POINT IS THE CEILING, NOT THE RETRY, and for writes it is ONLY the ceiling:
+ *
+ *   AUX_READ_CAPS_  Reads. Same shape and the same measured numbers as LIVE_PHASE_CAPS_, because
+ *                   it is the same hop, the same endpoint and the same stall. 12s first from the
+ *                   evening hop rather than the 3.1s median; 25s second because it must outlast
+ *                   the 25s `dtodayAwaitFlight_` wait the server may already be honoring. Re-asking
+ *                   a read is free, so it gets the second attempt.
+ *
+ *   WRITE_CAPS_     Writes. ONE attempt, deliberately — a single-element array, which is how
+ *                   gasFetchJson is told the retry count. **An abandoned request keeps running to
+ *                   completion on Apps Script** (that is why attempt two of a store half is a cache
+ *                   read rather than a second pull), so a write that hits its ceiling may ALREADY
+ *                   HAVE BEEN APPLIED. Retrying it is how one save becomes two — the exact hazard
+ *                   gasFetchJson's own header raises about re-sending a refusal, except that a
+ *                   timeout cannot be distinguished from success at all. So a write is bounded and
+ *                   then reported, never re-sent. 25s for the same reason as the read's second
+ *                   attempt.
+ *
+ * Reconcile's deposit load keeps its own 75s budget and is not covered by either: it crosses to GX
+ * Core, which has a 60s budget of its own underneath it. */
+const AUX_READ_CAPS_ = [12000, 25000];
+const WRITE_CAPS_    = [25000];
 
 // Safe HTML escape — prevents raw strings from backend injecting markup.
 function escHtml(s) {
@@ -5016,9 +5051,7 @@ async function _fetchCompareStore(proxyUrl, store, chunks) {
     let d = c.whole ? readSalesCache(store, c.year, c.month) : null;
     if (!d) {
       const url = `${proxyUrl}?store=${encodeURIComponent(store)}&from=${encodeURIComponent(c.from)}&to=${encodeURIComponent(c.to)}&token=${encodeURIComponent(getToken())}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      d = await res.json();
+      d = await gasFetchJson(url, null, AUX_READ_CAPS_);   // throws on a non-200 as well
       if (d.error) throw new Error(d.error);
     }
     acc.netSales   += d.netSales   || 0;
@@ -6323,8 +6356,9 @@ async function loadExpenses() {
   const nocache = expensesNocache;
   expensesNocache = false;
   try {
-    const res  = await fetch(`${proxyUrl}?action=expenses&token=${encodeURIComponent(getToken())}${nocache ? '&nocache=1' : ''}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=expenses&token=${encodeURIComponent(getToken())}${nocache ? '&nocache=1' : ''}`,
+      null, AUX_READ_CAPS_);
     if (data.error) throw new Error(data.error);
     expenseData = data;
   } catch(e) {
@@ -6344,8 +6378,8 @@ async function loadExpBudgets() {
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
   try {
-    const res  = await fetch(`${proxyUrl}?action=expbudgets&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=expbudgets&token=${encodeURIComponent(getToken())}`, null, AUX_READ_CAPS_);
     if (data.error) throw new Error(data.error);
     // Which categories are showing an APPLIED smart budget rather than the sheet's own number, and
     // which bill once rather than accruing. Both are carried through the cache: dropping `overlaid`
@@ -6398,10 +6432,9 @@ async function loadOtherRevenue() {
     /* SCREEN lane — the hero folds ATM and sublet into net sales, so this IS first-paint data and
        is deliberately NOT demoted. It is in the queue so that the cap means what it says: a
        request outside the pool is a request the pool cannot count. */
-    const data = await gasGate_(GAS_PRIO.SCREEN, async () => {
-      const res = await fetch(`${proxyUrl}?action=otherrev&token=${encodeURIComponent(getToken())}`);
-      return res.json();
-    });
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=otherrev&token=${encodeURIComponent(getToken())}`,
+      null, AUX_READ_CAPS_, GAS_PRIO.SCREEN);   // not gasGate_ — see loadPeriodGoals
     if (data.error) throw new Error(data.error);
     otherRevData = data;
     otherRevAgeMs = null;
@@ -6476,8 +6509,9 @@ async function loadRevenueDetail() {
   if (!proxyUrl) return;
   _revDetailLoading = year;
   try {
-    const res  = await fetch(`${proxyUrl}?action=revenue_detail&year=${year}&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=revenue_detail&year=${year}&token=${encodeURIComponent(getToken())}`,
+      null, AUX_READ_CAPS_);
     if (!data.ok) throw new Error(data.error);
     // The selection can move while this is in flight. Landing an older year's payload on top of a
     // newer selection would recreate exactly the mismatch this function exists to prevent.
@@ -6673,8 +6707,7 @@ async function saveRevModal() {
   try {
     const proxyUrl = getProxyUrl();
     const url = `${proxyUrl}?action=set_revenue&token=${encodeURIComponent(getToken())}&year=${year}&month=${month}&type=${type}&store=${encodeURIComponent(store)}&item=${encodeURIComponent(item)}&value=${value}`;
-    const res  = await fetch(url);
-    const data = await res.json();
+    const data = await gasFetchJson(url, null, WRITE_CAPS_);   // one attempt — never re-send a write
     if (!data.ok) throw new Error(data.error || 'Save failed');
     // Update local revenueDetail
     const block = type === 'atm' ? 'atm' : 'sub';
@@ -6879,9 +6912,10 @@ async function loadExpenseBreakdown() {
   expBreakError   = null;
   const r = expBreakRange();
   try {
-    const res  = await fetch(`${proxyUrl}?action=expense_breakdown&token=${encodeURIComponent(getToken())}`
-      + `&start=${encodeURIComponent(r.start)}&end=${encodeURIComponent(r.end)}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=expense_breakdown&token=${encodeURIComponent(getToken())}`
+      + `&start=${encodeURIComponent(r.start)}&end=${encodeURIComponent(r.end)}`,
+      null, AUX_READ_CAPS_);
     if (!data.ok) throw new Error(data.error || 'breakdown failed');
     data._range = key;
     expBreak = data;
@@ -7986,8 +8020,11 @@ async function reconPost(action, extra) {
   const qs = Object.entries(extra || {})
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
   const url = `${getProxyUrl()}?action=${action}&token=${encodeURIComponent(getToken())}&${qs}`;
-  const res  = await fetch(url);
-  const data = await res.json();
+  /* ONE ATTEMPT. Every reconcile write lands here, so this is the single place the no-retry rule
+     has to hold for them — and the one place it would do the most damage if it did not: an
+     abandoned request still runs to completion on Apps Script, so a re-sent `set_recon_*` is a
+     second write of a figure somebody is reconciling against. Bounded and reported, never re-sent. */
+  const data = await gasFetchJson(url, null, WRITE_CAPS_);
   if (!data.ok) throw new Error(data.error || 'write refused');
   return data;
 }
@@ -8428,9 +8465,7 @@ async function loadPnl(nocache) {
             + `&start=${encodeURIComponent(want.start)}&end=${encodeURIComponent(want.end)}`
             + `&token=${encodeURIComponent(getToken())}${nocache ? '&nocache=1' : ''}`;
   try {
-    const res  = await fetch(url);
-    const data = await res.json();
-    pnlData = data;
+    pnlData = await gasFetchJson(url, null, AUX_READ_CAPS_);
   } catch (e) {
     console.warn('P&L fetch failed:', e.message);
     pnlData = { error: e.message };
@@ -8720,10 +8755,9 @@ async function saveExpenseMappings() {
   }
   try {
     // GET with mappings in URL — avoids GAS POST redirect that silently drops the body
-    const res = await fetch(
-      `${getProxyUrl()}?action=save_expense_mapping&token=${encodeURIComponent(getToken())}&mappings=${encodeURIComponent(JSON.stringify(delta))}`
-    );
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${getProxyUrl()}?action=save_expense_mapping&token=${encodeURIComponent(getToken())}&mappings=${encodeURIComponent(JSON.stringify(delta))}`,
+      null, WRITE_CAPS_);
     if (!data.ok) throw new Error(data.error || 'save failed');
     pendingMappings  = {};
     originalMappings = {};
@@ -8799,8 +8833,8 @@ async function loadBudgetProposal() {
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
   try {
-    const res  = await fetch(`${proxyUrl}?action=budget_proposal&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=budget_proposal&token=${encodeURIComponent(getToken())}`, null, AUX_READ_CAPS_);
     if (!data.ok) throw new Error(data.error || 'proposal failed');
     budgetProposal = data;
     budgetEdits = {};
@@ -8920,9 +8954,10 @@ async function sbpToggleBillsOnce(cat) {
   budgetBillsOnce.has(cat) ? budgetBillsOnce.delete(cat) : budgetBillsOnce.add(cat);
   renderExpenses();
   try {
-    const res = await fetch(`${getProxyUrl()}?action=set_bills_once&token=${encodeURIComponent(getToken())}`
-      + `&categories=${encodeURIComponent(JSON.stringify([...budgetBillsOnce]))}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${getProxyUrl()}?action=set_bills_once&token=${encodeURIComponent(getToken())}`
+      + `&categories=${encodeURIComponent(JSON.stringify([...budgetBillsOnce]))}`,
+      null, WRITE_CAPS_);
     if (!data.ok) throw new Error(data.error || 'save failed');
     // The Expenses tab's copy of the flags is now stale.
     localStorage.removeItem('gc_cache_expbudgets');
@@ -8966,11 +9001,11 @@ async function applyBudgetSelected() {
     payload[p.category] = row;
   });
   try {
-    const res = await fetch(
+    const data = await gasFetchJson(
       `${getProxyUrl()}?action=apply_budget&token=${encodeURIComponent(getToken())}`
       + `&year=${encodeURIComponent(budgetProposal.year)}`
-      + `&categories=${encodeURIComponent(JSON.stringify(payload))}`);
-    const data = await res.json();
+      + `&categories=${encodeURIComponent(JSON.stringify(payload))}`,
+      null, WRITE_CAPS_);
     if (!data.ok) throw new Error(data.error || 'apply failed');
     // The overlay changed what expbudgets returns, so both the client cache and the tab's state
     // have to go — otherwise the Expenses tab keeps rendering the pre-apply numbers for 30 minutes
@@ -8990,9 +9025,10 @@ async function revertBudget(cat) {
   if (!confirm(one ? `Revert "${one}" to the budget it had before the smart budget was applied?`
                    : 'Revert ALL categories? The applied smart budget is discarded and the frozen budget stands again.')) return;
   try {
-    const res = await fetch(`${getProxyUrl()}?action=clear_budget&token=${encodeURIComponent(getToken())}`
-      + (one ? `&category=${encodeURIComponent(one)}` : ''));
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${getProxyUrl()}?action=clear_budget&token=${encodeURIComponent(getToken())}`
+      + (one ? `&category=${encodeURIComponent(one)}` : ''),
+      null, WRITE_CAPS_);
     if (!data.ok) throw new Error(data.error || 'revert failed');
     localStorage.removeItem('gc_cache_expbudgets');
     expBudgets = null; expBudgetsAgeMs = null; budgetProposal = null; expenseData = null; expBreak = null;
@@ -9388,8 +9424,9 @@ async function loadInventoryForStore(storeName) {
   if (!proxyUrl) { invLoading.delete(storeName); return; }
 
   try {
-    const res  = await fetch(`${proxyUrl}?action=inventory&store=${encodeURIComponent(storeName)}&token=${encodeURIComponent(getToken())}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=inventory&store=${encodeURIComponent(storeName)}&token=${encodeURIComponent(getToken())}`,
+      null, AUX_READ_CAPS_, GAS_PRIO.SECONDARY);
     if (data.error) throw new Error(data.error);
     inventoryData[storeName] = data;
     writeCache(cacheKey, data);
@@ -9725,7 +9762,16 @@ function hideLoginScreen() {
 function prewarmSalesProxy() {
   try {
     var proxyUrl = (document.getElementById('proxy-url') || {}).value || DEFAULT_PROXY;
-    fetch(proxyUrl + '?action=libversion').catch(function () {});
+    /* BOUNDED, BUT NOT THROUGH gasFetchJson AND NOT THROUGH THE POOL — the one deliberate
+       exception, and both halves of that are the point. Taking a lane would put a request nobody
+       is waiting for in front of the sign-in that follows it, and gasFetchJson parses a body this
+       call throws away. What it DID need is a ceiling: a bare fetch here could hold a connection
+       open for the life of the login screen. 15s is far past a warm /exec and long enough to have
+       done its job. */
+    var warmCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    if (warmCtl) setTimeout(function () { warmCtl.abort(); }, 15000);
+    fetch(proxyUrl + '?action=libversion', warmCtl ? { signal: warmCtl.signal } : undefined)
+      .catch(function () {});
   } catch (e) { /* the login form is not worth an exception */ }
 }
 
@@ -9799,7 +9845,19 @@ function startSalesHeartbeat() {
     if (!session) { salesLogout(); return; }
     try {
       var proxyUrl = (document.getElementById('proxy-url') || {}).value || DEFAULT_PROXY;
-      var res = await fetch(proxyUrl + '?action=ping&token=' + encodeURIComponent(session.token));
+      /* BOUNDED, BUT DELIBERATELY NOT THROUGH gasFetchJson — aux_hang_bounds_test pins this and it
+         is right: THE TEN-MINUTE INTERVAL IS ALREADY THIS CALL'S RETRY, so a retry ladder here
+         would re-ask a question that is about to be asked again anyway, and a lane taken for it is
+         a lane the screen cannot have. What it was missing is only the CEILING: unbounded, one beat
+         could sit open across the whole interval and overlap the next. A missed beat is harmless —
+         the catch below deliberately does not log anyone out. */
+      var beatCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var beatTimer = beatCtl ? setTimeout(function () { beatCtl.abort(); }, 25000) : null;
+      var res;
+      try {
+        res = await fetch(proxyUrl + '?action=ping&token=' + encodeURIComponent(session.token),
+                          beatCtl ? { signal: beatCtl.signal } : undefined);
+      } finally { if (beatTimer) clearTimeout(beatTimer); }
       var data = await res.json();
       if (data.ok && data.token) {
         GC_SALES_AUTH.save(Object.assign({}, session, { token: data.token, expiresAt: data.expiresAt }));
@@ -9851,8 +9909,9 @@ async function saveOtherRevModal() {
   status.textContent = 'Saving…';
   try {
     const proxyUrl = getProxyUrl();
-    const res = await fetch(`${proxyUrl}?action=set_otherrev&token=${encodeURIComponent(getToken())}&type=${type}&month=${month}&value=${value}`);
-    const data = await res.json();
+    const data = await gasFetchJson(
+      `${proxyUrl}?action=set_otherrev&token=${encodeURIComponent(getToken())}&type=${type}&month=${month}&value=${value}`,
+      null, WRITE_CAPS_);
     if (!data.ok) throw new Error(data.error || 'Save failed');
     otherRevData = data.data;
     writeCache('otherrev', data.data);

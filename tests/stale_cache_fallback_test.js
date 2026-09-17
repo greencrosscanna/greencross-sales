@@ -168,10 +168,19 @@ function makeWorld() {
     hiddenOtherRevs: new Set(),
     activeDay: null, activeWeek: null, activeMonth: 9, activeYear: 2026,
     _expBudgetsTried: false, _expBudgetsLoading: false,
-    /* The request queue's stuck-slot watchdog arms a timer. Nothing here should ever fire it — the
-       fakes settle synchronously — so a no-op is the honest fake; a firing one would release a lane
-       that is still in use and measure the harness rather than the loader. */
-    setTimeout: () => 1, clearTimeout: () => {},
+    /* REAL TIMERS, and v2.608 is why they had to become real. This was a no-op — honest while the
+       only timer in reach was the queue's stuck-slot watchdog, which nothing here should ever fire.
+       Then the loaders moved onto gasFetchJson's retry ladder, whose backoff between attempts is an
+       `await new Promise(r => setTimeout(r, …))`. A setTimeout that never calls back makes that
+       promise never settle, so §5 stopped finishing at all — the suite hung instead of failing, and
+       only the exit guard at the top of this file turned that into a visible FAIL rather than a
+       green run that stopped early. Real timers cost ~1s per failing-fetch section, for a backoff
+       the app really takes. The watchdog is cleared on release, so it still never fires. */
+    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: t => clearTimeout(t),
+    /* gasFetchJson arms an abort per attempt. The fakes settle synchronously so it never fires;
+       what matters is that `signal` exists, because the shipped code passes it to fetch. */
+    AbortController: function () { this.signal = { aborted: false }; this.abort = () => {}; },
+    Promise, Error,
   };
   w.Date = function FakeDate(a) { return arguments.length ? new Date(a) : new Date(w.clock); };
   w.Date.now = () => w.clock;
@@ -194,8 +203,23 @@ const GASQ = (() => {
   return HTML.slice(a, b);
 })();
 
+/* THE PER-ATTEMPT CEILINGS, for the same reason GASQ is here. v2.608 routed both loaders through
+   gasFetchJson, which the GASQ slice stops immediately short of — so without these two lines every
+   healthy-load section reached its catch through a ReferenceError on gasFetchJson rather than
+   through the fetch it is written to exercise. The failure sections carried on passing, because a
+   ReferenceError and a rejected fetch look identical from inside a catch. That is the exact trap
+   the GASQ comment above describes, sprung a second time by a different missing symbol. */
+const CAPS = (() => {
+  const a = HTML.indexOf('const LIVE_PHASE_CAPS_');
+  const b = HTML.indexOf('const WRITE_CAPS_');
+  if (a < 0 || b < 0 || b < a) throw new Error('the cap constants moved — re-anchor CAPS');
+  return HTML.slice(a, HTML.indexOf('\n', b));
+})();
+
 const SRC = [
   GASQ,
+  CAPS,
+  grabOr('gasFetchJson'),
   grabOr('readCache'), grabOr('writeCache'), grabOr('readStaleCache'), grabOr('fmtCacheAgo_'),
   grabOr('applyExpBudgets_'), grabOr('loadExpBudgets'), grabOr('expBudgetOrigin_'),
   grabOr('loadOtherRevenue'), grabOr('computeOtherRev'), grabOr('_incomeOtherRevHtml'),
@@ -364,8 +388,15 @@ const S8 = () => asection('8. an Apply removes the entry, so the fallback cannot
 });
 
 const S9 = () => asection('9. a healthy load carries no age and no caption', async () => {
-  const ok200 = () => Promise.resolve({ json: () => Promise.resolve(
-    { budgets: BUDGETS, overlaid: [], bills_once: [] }) });
+  /* A REAL Response SHAPE, not just `.json()`. gasFetchJson checks `res.ok` and reads `res.text()`
+     first — deliberately, because res.json() on a bounced HTML page throws a parser error that
+     reads like a server fault. A stub that offers only `.json()` fails the healthy path while the
+     failure paths carry on passing. */
+  const ok200 = () => Promise.resolve({
+    ok: true, status: 200,
+    text: () => Promise.resolve(JSON.stringify({ budgets: BUDGETS, overlaid: [], bills_once: [] })),
+    json: () => Promise.resolve({ budgets: BUDGETS, overlaid: [], bills_once: [] }),
+  });
   {
     const { w, c } = await runExpBudgets({ seedAge: null, fetch: ok200 });
     ok('the budgets landed', !!w.expBudgets && !!w.expBudgets['Rent Expense']);
@@ -452,7 +483,11 @@ section('14. nothing cached and NOT yet asked — say nothing', () => {
 });
 
 const S15 = () => asection('15. a healthy otherrev load carries no age', async () => {
-  const ok200 = () => Promise.resolve({ json: () => Promise.resolve(OTHERREV) });
+  const ok200 = () => Promise.resolve({          // real Response shape — see §9's note
+    ok: true, status: 200,
+    text: () => Promise.resolve(JSON.stringify(OTHERREV)),
+    json: () => Promise.resolve(OTHERREV),
+  });
   {
     const { w, c } = await runOtherRev({ seedAge: null, fetch: ok200 });
     ok('the payload landed', !!w.otherRevData && w.otherRevData.atm.Sep === 9493);

@@ -655,6 +655,56 @@ store falls to the next 60s poll.
 Browser, cold, live backend (proxy change not yet deployed): fast stores' today at ~7s; three hit
 28s and their retries answered in ~6s; last store 36s — where v2.591 would have fallen to the poll.
 
+## THE STALLS ARE NOT INDEPENDENT — the endpoint goes away, and takes everything in flight (2026-09-17)
+
+**The first clean six-wide `libversion` run, and it breaks the model every number below is built
+on.** 240 requests, 40 rounds of six, 2026-09-17 ~15:30 PT, via `tools/exec_stall_probe.py` — the
+run this file has been asking for since the instrument was checked in.
+
+```
+requests 240 · median 1.7s · p95 2.6s · worst 27.0s · STALLS >=10s  6 = 2.5% · one 404
+round 12  slowest 27.0s  !!!!!!   <- STALL      ← and every other round was clean
+```
+
+**All six stalls were in ONE round. All six requests of that round.** Under the independent
+per-request model — the one behind "a boot fires sixteen, so a load carries a stall ~43% of the
+time" — the probability of that is **1.6 × 10⁻¹⁰**. Independence is not a simplification here, it is
+refuted. Six stalls spread over six rounds and six stalls landing on one are the same rate and
+completely different failures.
+
+**What it actually looks like: the endpoint stops answering for ~27 seconds and everything in
+flight dies together.** That is an OUTAGE WINDOW, not a dropped request. The consequences invert
+several things this file says:
+
+- **`1-(1-p)^16` is the wrong arithmetic**, and the probe prints it — *"a 16-request load carries a
+  stall ~33% of the time"*. If stalls are windows, a load does not roll sixteen dice: it either
+  misses the window entirely and is perfectly clean, or it opens inside one and loses **every
+  request it has in the air**. That is much better most of the time and much worse occasionally,
+  which is exactly the reported experience — *"it's fine"* for days, then *"it took 4 minutes"*.
+- **It explains the 40% morning** (the section further down) without needing a raised per-request
+  rate at all. A morning of frequent windows reads as a high rate when you average over it, and the
+  whole distribution shifting minute to minute — which that section measured and found puzzling —
+  is what windows look like through an averaging instrument.
+- **It weakens the 12-30 concurrency reading further.** Six-wide, one window took all six. Thirty
+  requests spanning a window would lose a chunk together and look exactly like concurrency-dependent
+  degradation. Nobody has a run that separates those.
+- **Retries are the right lever and the ceiling matters more than it looked.** Against a 27s window,
+  a first attempt at 12s fails, and the second's 25s ceiling only clears it if the retry starts late
+  enough. Against an independent 2.5% drop, attempt two almost always succeeds. **Do not re-tune on
+  this one run** — that is the v2.592 mistake, which this file has now recorded twice.
+
+**This does NOT replace the 3.4%, and comparing them directly is the trap the tool header warns
+about.** That baseline was 174 authenticated store-month pulls carrying 2.5-3.5s of our own backend
+in every timing; this is `libversion` and nothing else, which is why the median moved 3.1s → 1.7s.
+**Same endpoint, different question.** 2.5% of 240 six-wide is the first number that measures the
+HOP, and its honest form is *"one ~27s window in 3.5 minutes"*, not a percentage.
+
+**What would settle it: several runs at different hours, and the per-request `(start, duration)`
+pairs kept** so a window can be seen rather than inferred from a round. The probe currently sorts
+before reporting — the same flaw this file already records about the 09-15 numbers, still unfixed,
+and the reason a single `!!!!!!` row is doing all the work above. **One run, one window; the shape
+is strong evidence and the rate is not a baseline.**
+
 ## …and twenty-one OTHER calls had no ceiling at all (v2.608, 2026-09-17)
 
 The ladder below was built for the twelve store halves and given to nothing else. **Twenty-one of

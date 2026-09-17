@@ -696,6 +696,14 @@ noticing. The eight dropped the 30-wide run's four stalls outright. What the raw
   `libversion` precisely to remove that confound, so its baseline and its instrument are not the
   same experiment** — its header now says so, and a fresh six-wide `libversion` run is what would
   replace the 3.4% properly.
+
+  **And there is a mechanism for that reading, which makes it more than a hedge.** Every GX app runs
+  its Apps Script as `sky@`, and Google caps **simultaneous executions at 30 per account** — Crew
+  measured a peak of 114 simultaneous on 2026-09-15 from the Executions log. So a 30-wide sweep from
+  one machine is firing *at the cap on its own*, before any other app's traffic. That turns "Google
+  degrades past 12-wide" into **"we queue behind ourselves past 12-wide"**, which is a different
+  problem with a different fix, and a suite-wide one rather than ours. (Hub session, 2026-09-17,
+  from Crew's measurement — not re-derived here.)
 - **Not a double-count.** Every one of the 234 was a raw `urllib.request.urlopen` from the command
   line — no retry ladder, no `gx-client` tombstones — so no timing here is one logical call counted
   twice, and nothing in the data clusters at gx-client's 20s attempt boundary. (Asked and answered

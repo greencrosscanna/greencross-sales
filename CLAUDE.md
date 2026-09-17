@@ -751,7 +751,10 @@ noticing. The eight dropped the 30-wide run's four stalls outright. What the raw
 - **These 234 were not `libversion`.** Every one was an authenticated `store=…&phase=settled`
   store-month pull, carrying 2.5-3.5s of this app's own backend work inside each timing — so the run
   cannot separate Google's hop from Apps Script executing our pull. At 30 wide, three of the four
-  stalls cluster at 13.3-14.4s rather than the 37-60s hang seen six-wide: the shape of our own
+  stalls cluster at 13.3-14.4s, which is a different SHAPE from six-wide rather than merely a
+  different size. Six-wide is bimodal — 11.4, 21.2, 45.4, 60.2, 60.2, 60.2 — with half of them
+  sitting exactly at Google's own 60s cutoff, i.e. requests that never came back at all. A tight
+  13-14s cluster with nothing at the cutoff is the shape of our own
   backend queueing, not of the hop dropping a request. **`tools/exec_stall_probe.py` fires
   `libversion` precisely to remove that confound, so its baseline and its instrument are not the
   same experiment** — its header now says so, and a fresh six-wide `libversion` run is what would

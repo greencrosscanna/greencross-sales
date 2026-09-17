@@ -8,15 +8,17 @@ could not re-run it and had only the previous session's conclusion to go on. A c
 measurement. This is the throwaway, checked in.
 
 WHAT IT MEASURES, AND WHAT IT CANNOT. Apps Script's /exec hop intermittently fails to return —
-measured 2026-09-15 at 3.4% (8 of 234) taking 11-60s while the five requests beside them answered in
-three. That is a Google-side flake outside this app's server work, so:
+measured 2026-09-15 at 3.4% (6 of 174 fired SIX-WIDE) taking 11-60s while the requests beside them
+answered in three. That is a Google-side flake outside this app's server work, so:
 
   * `?action=loadprobe` CANNOT SEE IT. loadprobe times the server's own execution; the stall happens
     outside the handler, so a clean loadprobe walk and a stalling load are perfectly consistent.
   * The route does not matter. This fires `action=libversion` — public, no secret, trivial work — on
     purpose: it isolates the HOP from anything the handler does. A slow reply here is the hop.
   * SIX AT A TIME, because that is the shape a real load fires and a load is only as fast as its
-    slowest request. Sequentially, 25 of 25 were clean on the day six-at-a-time was stalling.
+    slowest request. NOT because sequential requests are safe: the often-cited "25 of 25 clean
+    sequentially" on 2026-09-15 expects 0.85 stalls at a 3.4% rate, so a clean 25 happens 42% of
+    the time by chance. It establishes no concurrency threshold. Six is the load's shape, full stop.
 
 WHAT THE ANSWER LICENSES. The app's only lever is how fast it gives up on a stalled request
 (`gasFetchJson(url, null, CAPS)` in index.html — live [12000, 25000], settled [8000, 12000, 16000]).
@@ -44,9 +46,17 @@ import urllib.request
 DEFAULT_EXEC = ("https://script.google.com/macros/s/"
                 "AKfycbzju5HeWTGq_5uND_o6M-Gzdcy-lRQw7flOwzI013Me03SumhV8lYV_O_Z4-cIBn-lp/exec")
 
-# Measured 2026-09-15 on this app's live /exec, six at a time, 234 requests. Printed beside the
-# fresh numbers so the output interprets itself instead of needing this file read alongside it.
-BASELINE = {"median": 3.1, "p95": 4.1, "stall_pct": 3.4, "when": "2026-09-15"}
+# Measured 2026-09-15 on this app's live /exec, six at a time: 6 stalls in 174 six-wide requests.
+# Printed beside the fresh numbers so the output interprets itself instead of needing this file read
+# alongside it.
+#
+# THE BASELINE AND THIS INSTRUMENT ARE NOT THE SAME EXPERIMENT, and that is worth knowing before
+# comparing a fresh run to it. Those 174 were authenticated store-month pulls (store=...&
+# phase=settled), so 2.5-3.5s of THIS APP's backend work sits inside every timing; this probe fires
+# `libversion` precisely to remove that. A fresh six-wide libversion run is what would replace 3.4%
+# honestly. (The same day's wider runs — 12/18/30 concurrent, 60 requests, >=6 stalls — are NOT in
+# this rate and must not be averaged into it. CLAUDE.md, the v2.597 section, has the full ledger.)
+BASELINE = {"median": 3.1, "p95": 4.1, "stall_pct": 3.4, "when": "2026-09-15", "n": 174}
 
 # The per-attempt ceilings index.html actually allows a live half. A request slower than the first
 # ceiling costs a retry; one slower than the sum costs the store its place in the load.
@@ -115,7 +125,7 @@ def main():
     print(f"  worst           {times[-1]:6.1f}s")
     pct = 100.0 * len(stalls) / len(times)
     print(f"  STALLS >={args.stall:.0f}s     {len(stalls):4d}  = {pct:4.1f}%  "
-          f"(baseline {BASELINE['stall_pct']}%)")
+          f"(baseline {BASELINE['stall_pct']}%, n={BASELINE['n']} six-wide)")
     if bad_codes:
         print(f"  non-200         {bad_codes}")
 

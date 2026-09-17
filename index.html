@@ -2397,13 +2397,17 @@ async function gasFetchJson(url, attempts, timeoutMs, prio) {
    *
    * One flat ceiling forces a single number to answer two different questions: how long a healthy
    * call is allowed to take, and how long to wait before concluding this one is never coming back.
-   * Measured 2026-09-15 over 234 requests to this app's own /exec, six at a time the way a load
-   * fires them: p50 3.1s, p90 3.9s, p95 4.1s — and 8 of the 234 (3.4%) stalled 11-60s while their
-   * five siblings answered in three. The stall is Google's /exec front end, not this app and not
-   * the store: 25 of 25 sequential requests to the same route in the same window were clean, and a
-   * retry after a stall answered normally every time. So the healthy band and the broken band do
-   * not overlap at all, and a short FIRST attempt with a longer second costs the healthy case
-   * nothing while cutting the broken one by two thirds. */
+   * Measured 2026-09-15 against this app's own /exec, six at a time the way a load fires them:
+   * over 174 six-wide requests, p50 3.1s, p90 3.9s, p95 4.1s — and 6 of the 174 (3.4%) stalled
+   * 11-60s while their siblings answered in three. The stall is Google's /exec front end: two of
+   * the six were the connection closed at Google's own 60s limit, and a retry after a stall
+   * answered normally every time. So the healthy band and the broken band do not overlap at all,
+   * and a short FIRST attempt with a longer second costs the healthy case nothing while cutting
+   * the broken one by two thirds.
+   *
+   * Corrected 2026-09-17: this said "8 of 234". The 234 pooled four concurrency widths, and
+   * 8/234 rounded to the same 3.4% as the honest 6/174, so the error survived in three files.
+   * The widths above six are a separate, unreplicated reading — see CLAUDE.md, v2.597 section. */
   const caps  = Array.isArray(timeoutMs) ? timeoutMs : null;
   const tries = caps ? caps.length : (attempts || 3);
   // A BOUNDED wait is the point, not just the retry. A bare fetch to /exec has no timeout, and a
@@ -2461,12 +2465,16 @@ async function gasFetchJson(url, attempts, timeoutMs, prio) {
  * produced v2.592, because v2.592 fixed a different cause of it and left this one standing.
  *
  * WHAT WAS MEASURED (2026-09-15, this app's live /exec, six requests at a time the way a load
- * fires them, 234 requests): a healthy call is 3.1s at the median and 4.1s at p95. Eight of the
- * 234 — 3.4% — took 11s to 60s while the five requests beside them answered in three. Sequentially,
- * 25 of 25 were clean. So this is not a slow store, a slow month or a busy backend; it is the /exec
- * hop intermittently failing to come back, and it strikes a request at random. A boot fires about
- * sixteen of them, so roughly HALF of all loads carry one, and the load is only as fast as its
- * slowest request.
+ * fires them, 174 six-wide requests): a healthy call is 3.1s at the median and 4.1s at p95. Six of
+ * the 174 — 3.4% — took 11s to 60s while the requests beside them answered in three. So this is not
+ * a slow store and not a slow month; it is the /exec hop intermittently failing to come back, and
+ * it strikes a request at random. A boot fires about sixteen of them, so a load carries one ~43% of
+ * the time, and the load is only as fast as its slowest request.
+ *
+ * Corrected 2026-09-17: this said "eight of 234" and cited "25 of 25 sequential were clean" as
+ * proof. The 234 pooled four concurrency widths (six-wide is the only one that describes a load),
+ * and a clean run of 25 happens 42% of the time at a 3.4% rate — it proves nothing either way.
+ * Full ledger and the wider-concurrency reading in CLAUDE.md, the v2.597 section.
  *
  * WHY THAT READ AS 60 SECONDS. v2.592 gave the live half 28s x 2 because the Dutchie hop genuinely
  * took 11.7-23.6s that evening, and abandoning a request that was about to succeed cost the store

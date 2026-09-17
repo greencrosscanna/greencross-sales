@@ -259,9 +259,10 @@ const HTML_BOUNCE = '<!DOCTYPE html><html><head><title>Page Not Found</title></h
    *
    * Sky, 2026-09-15: "still taking 60+sec to load on mobile." A stalled /exec never answers and a
    * slow Dutchie hop answers late, and one flat ceiling has to be wrong for one of them — set for
-   * the hop (28s), it let every stall hold the load for 56 seconds. Measured that day: 8 of 234
-   * requests stalled 11-60s while their siblings answered in 3.1s median. So the first attempt is
-   * short and the later ones patient.
+   * the hop (28s), it let every stall hold the load for 56 seconds. Measured that day: 6 of 174
+   * six-wide requests stalled 11-60s while their siblings answered in 3.1s median. So the first
+   * attempt is short and the later ones patient. (Corrected 2026-09-17 from "8 of 234" — the 234
+   * pooled four concurrency widths; CLAUDE.md, v2.597 section, has the ledger.)
    *
    * EXECUTED, not read: the assertion is on the DELAY each abort timer is armed with, in order,
    * which is the only thing that decides when a stalled request is abandoned. */

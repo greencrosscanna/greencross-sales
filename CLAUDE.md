@@ -660,12 +660,62 @@ Browser, cold, live backend (proxy change not yet deployed): fast stores' today 
 Sky, 2026-09-15, on v2.596: *"still taking 60+sec to load on mobile."* Same sentence as v2.592,
 different cause — v2.592 fixed the slow HOP and left the stall standing.
 
-**MEASURED that day against this app's live `/exec`, six requests at a time the way a load fires
-them, 234 requests: median 3.1s, p95 4.1s — and eight of them (3.4%) took 11 to 60 seconds while
-the five requests beside them answered in three.** Sequentially, 25 of 25 were clean. So it is not
-a slow store, not a slow month, not a busy backend and not concurrency: it is the `/exec` hop
-intermittently failing to come back, and it hits a request at random. **A boot fires about sixteen,
-so roughly HALF of all loads carry one**, and a load is only as fast as its slowest request.
+**MEASURED that day against this app's live `/exec`, 234 requests in four runs between 16:43 and
+16:51 PT — and the number that matters is the six-wide one, because six at a time is the shape a
+load fires. 174 of the 234 were fired six-wide: median 3.1s, p95 4.1s, and SIX of them (3.4%) took
+11 to 60 seconds while the requests beside them answered in three.** The other 60 were a
+concurrency sweep at 12, 18 and 30 wide, where six more stalled. It is the `/exec` hop
+intermittently failing to come back — two of the six-wide stalls were Google closing the connection
+at its own 60s limit — and at six-wide it hits a request at random. **A boot fires about sixteen,
+so a load carries one ~43% of the time**, and a load is only as fast as its slowest request.
+
+*Corrected 2026-09-17 from the raw per-request timings, which only this repo holds.* This paragraph
+said **"eight of them (3.4%)"** out of 234 and concluded **"not concurrency"**. Both were wrong the
+same way — **the 234 pools four different concurrency widths** — and the wrongness hid because
+`8/234 = 3.42%` lands on the same printed "3.4%" as the honest `6/174 = 3.45%`. The headline agreed
+while the counts did not, which is why three docs could cite it for two days without anyone
+noticing. The eight dropped the 30-wide run's four stalls outright. What the raw timings settle:
+
+- **The stall count is a FLOOR, not a count.** The sweep printed only the four slowest durations per
+  width. At 6, 12 and 18 wide the fifth value is already under 5s, so those are exact; at 30 wide
+  all four printed are ≥13.3s, so that run is **≥4** and the totals are **≥6 of 60** and **≥12 of
+  234**. Nobody can say the true number without re-running.
+- **"Not concurrency" was never supported — and neither is the opposite.** 6 of 60 at 12-30 wide
+  against 2.1 expected looks like something (Poisson p≈0.02), but that test treats the six-wide rate
+  as known when it came out of the same run; conditioning on the 12 stalls the experiment actually
+  produced gives **p≈0.06**. One run, one evening, unreplicated. **Do not harden it into "10%", and
+  do not average the two into "3-10%"** — that range describes neither condition.
+- **The sequential control proves nothing.** 25 clean samples against a 3.4% per-request rate expect
+  0.85 stalls, so a clean 25 happens **42% of the time by chance**. It is the sample size, not
+  evidence of a concurrency threshold. It stays in the file as a sanity check and nothing more.
+- **These 234 were not `libversion`.** Every one was an authenticated `store=…&phase=settled`
+  store-month pull, carrying 2.5-3.5s of this app's own backend work inside each timing — so the run
+  cannot separate Google's hop from Apps Script executing our pull. At 30 wide, three of the four
+  stalls cluster at 13.3-14.4s rather than the 37-60s hang seen six-wide: the shape of our own
+  backend queueing, not of the hop dropping a request. **`tools/exec_stall_probe.py` fires
+  `libversion` precisely to remove that confound, so its baseline and its instrument are not the
+  same experiment** — its header now says so, and a fresh six-wide `libversion` run is what would
+  replace the 3.4% properly.
+- **Not a double-count.** Every one of the 234 was a raw `urllib.request.urlopen` from the command
+  line — no retry ladder, no `gx-client` tombstones — so no timing here is one logical call counted
+  twice, and nothing in the data clusters at gx-client's 20s attempt boundary. (Asked and answered
+  by the hub session, 2026-09-17: `gx-client.js` bounds both its paths, 20s per attempt, so a long
+  row in a browser network panel is an abandoned request still on the wire, not an unbounded wait.)
+
+**The ledger, written down so it is never reconstructed again.** It took reading a session
+transcript to recover this, which is the same failure the probe tool was checked in to end — a
+conclusion survived and the measurement did not.
+
+| run (PT) | wide | requests | stalled ≥10s | the stalls |
+|---|---|---|---|---|
+| 16:43 | 6 | 6 | 2 | 60.2, 60.2 (both connection closed by Google) |
+| 16:44 | 12 | 12 | 1 | 37.3 |
+| 16:45 | 18 | 18 | 1 | 60.5 |
+| 16:46 | 30 | 30 | **≥4** | 37.5, 14.4, 14.4, 13.3 (only the top four were printed) |
+| 16:49 | 6 | 48 | 2 | 21.2, 45.4 |
+| 16:51 | 6 | 120 | 2 | 11.4, 60.2 |
+| **all** | mixed | **234** | **≥12** | six-wide subtotal **6 of 174 = 3.4%** |
+| 17:43 | 6 | 120 | 0 | — *(the "0 of 120 an hour later" run; NOT part of the 234)* |
 
 This is the same Google-side flake the repo already documents as "~6% of rapid calls 404". The new
 part is that it also presents as a **hang**, which is much more expensive, because a 404 fails

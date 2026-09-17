@@ -49,8 +49,8 @@ const NETS = { Bend: 1120, Center: 980, Commercial: 1340, Hillsboro: 760, 'Portl
 
 /* The context the two hero functions actually read: the state map, the today-pending set, the
  * period range, STORES, the store filter and liveData itself. */
-function ctxFor({ state = {}, todayPending = [], landed = [], filter = null,
-                  range = { from: '2026-09-01', to: TODAY } } = {}) {
+function ctxFor({ state = {}, todayPending = [], landed = [], filter = null, day = null,
+                  inFlight = true, range = { from: '2026-09-01', to: TODAY } } = {}) {
   const ctx = {
     STORES: SIX.map(n => ({ name: n, display: n })),
     _storeStateMap: state,
@@ -61,13 +61,14 @@ function ctxFor({ state = {}, todayPending = [], landed = [], filter = null,
     activeStore: 'All',
     activeStoreSet: filter ? new Set(filter) : null,
     activeWeek: null,
-    activeDay: null,
+    activeDay: day,
+    _loadAllStoresInFlight: inFlight,
     laDay: () => TODAY,
     periodRange: () => ({ from: range.from, to: range.to }),
     toDateStr: d => d,
   };
   vm.createContext(ctx);
-  vm.runInContext([grab('viewIncludesToday_'), grab('getActiveStores'),
+  vm.runInContext([grab('viewIncludesToday_'), grab('getActiveStores'), grab('salesPending'),
                    grab('getPeriodTotals'), grab('_heroLiveHtml_')].join('\n'), ctx);
   return ctx;
 }
@@ -138,6 +139,31 @@ console.log('\n4. the first frame and the 60s poll must both stay quiet');
   const hp = poll._heroLiveHtml_('14:32', '');
   ok('4b a re-poll of a WHOLE total is not called partial', !hp.includes('so far'));
   ok('4b and keeps the green light',                        /class="ic-hero-live"/.test(hp));
+
+  /* 4c fixture — a TODAY view, two stores landed, and every landed store's today still missing.
+   * salesPending()'s SECOND clause shimmers the hero here, so there is no number to qualify. FOUND
+   * IN THE BROWSER, not by writing this test first: a cold mobile load showed `1/6 stores so far`
+   * in amber beside a shimmering hero at t+2.4s. A liveData-only guard cannot see this case. */
+  const shim = ctxFor({ state: Object.assign({}, allOk, { Commercial: 'loading', Hillsboro: 'loading',
+                                                          'Portland Rd': 'loading', River: 'loading' }),
+                        landed: ['Bend', 'Center'], todayPending: ['Bend', 'Center'], day: TODAY });
+  ok('4c the hero really is shimmering in this fixture', shim.salesPending() === true);
+  const hs = shim._heroLiveHtml_('14:32', '');
+  ok('4c nothing is claimed over a shimmer', !hs.includes('so far'));
+  ok('4c no coverage count of any shape',    !/\d\/\d stores/.test(hs));
+  /* What IS here is v2.600's today-pending note, amber over the shimmer. That is pre-existing
+   * behavior and deliberately untouched — recorded so the next reader knows it was looked at and
+   * left, rather than missed. */
+  ok('4c the v2.600 today-pending message is what remains', hs.includes('2 stores pending'));
+
+  /* 4d fixture — nothing loaded and nothing in flight. salesPending() is FALSE here (it describes a
+   * load that is running), so the liveData check is the only thing standing between this state and
+   * a confident `0/6 stores so far`. Written because dropping that check failed nothing otherwise:
+   * an unfalsifiable guard is indistinguishable from a guard that works. */
+  const dead = ctxFor({ state: {}, landed: [], inFlight: false });
+  ok('4d salesPending does not cover this state', dead.salesPending() === false);
+  const hd = dead._heroLiveHtml_('14:32', '');
+  ok('4d an app with nothing loaded claims no coverage', !/so far|\d\/\d stores/.test(hd));
 }
 
 /* ── 5 ────────────────────────────────────────────────────────────────────────────────────────
@@ -217,31 +243,34 @@ if (fail) process.exitCode = 1;
 /* ── VERIFICATION AGAINST HEAD ────────────────────────────────────────────────
  * Run against the PRE-FIX source with the suite's own escape hatch:
  *
- *   git show HEAD:index.html > /tmp/head.html && HERO_SRC=/tmp/head.html node tests/hero_partial_total_test.js
+ *   git show 63b7258:index.html > /tmp/head.html && HERO_SRC=/tmp/head.html node tests/hero_partial_total_test.js
  *
- * MEASURED, not predicted: 27 passed, 7 failed — §2's four positive assertions (the hero emits no
+ * MEASURED, not predicted: 31 passed, 7 failed — §2's four positive assertions (the hero emits no
  * note at all mid-assembly), §5b's two (the today-pending branch answers instead of the bigger
  * hole), and §6's filtered count (there is no such branch to scope).
  *
- * §1, §3, §4, §7, §8, §9 pass on HEAD ON PURPOSE: they are the properties this change had to leave
- * standing, and a file where every line failed would prove nothing about any one of them. Three
- * assertions in the new sections are negative and therefore also pass on HEAD — §2's "the figure is
- * NOT hidden", §4a's "not red" and §6's "not against all six". They are not vacuous: each is failed
- * by a mutation below, or (for §4a's) by mutation 7 of hero_live_state_test.js, which is the file
+ * §1, §3, §4, §7, §8, §9 pass on the pre-fix source ON PURPOSE: they are the properties this
+ * change had to leave standing, and a file where every line failed would prove nothing about any
+ * one of them. Three assertions in the new sections are negative and pass there too — §2's "the
+ * figure is NOT hidden", §4a's "not red" and §6's "not against all six". None is vacuous: each is
+ * failed by a mutation below, or (for §4a's) by mutation 7 of hero_live_state_test.js, the file
  * that owns the red branch.
  *
  * ── MUTATION LOG ──────────────────────────────────────────────────────────
- * Counts measured by applying each edit to a copy of index.html and running this file against it.
- * Every target was asserted present first (the edit is a single exact replacement that has to
- * match), so no mutation was vacuous.
+ * Counts MEASURED by applying each edit to a copy of index.html and running this file against it.
+ * Every edit is a single exact replacement that has to match, so none of them was vacuous.
  *
- *   1. `counted.length < shown.length` -> `< 0`                  7 fail  the whole feature: §2, §5b, §6
- *   2. the `Object.keys(liveData).length > 0` guard dropped      1 fail  §4a — a cold boot claims 0/6
- *   3. membership read off _storeStateMap instead of liveData,
- *      i.e. storeNotCurrent_'s answer used verbatim              2 fail  §4b both — every poll flagged
- *   4. the `partial` branch moved ABOVE `failed`                 2 fail  §5a both
- *   5. the `partial` branch moved BELOW `pend`                   2 fail  §5b both
- *   6. `getActiveStores()` -> `names`                            2 fail  §6 both
- *   7. `stores so far` -> `stores`                               4 fail  §2 x3, §5b, §6
- *   8. `GAS_MAX_INFLIGHT = 8` -> `19`                            1 fail  §9 — the v2.605 wave cap
+ *   1. `counted.length < shown.length` -> `< 0`                  7 fail  the feature: §2, §5b, §6
+ *   2. the `Object.keys(liveData).length > 0` guard dropped      1 fail  §4d — a dead app says 0/6
+ *   3. the `!salesPending()` guard dropped                       3 fail  §4c — claimed over a shimmer
+ *   4. membership read off _storeStateMap instead of liveData,
+ *      i.e. storeNotCurrent_ used verbatim                       2 fail  §4b — every poll flagged
+ *   5. the `partial` branch moved ABOVE `failed`                 2 fail  §5a both
+ *   6. the `partial` branch moved BELOW `pend`                   2 fail  §5b both
+ *   7. `getActiveStores()` -> `names`                            2 fail  §6 both
+ *   8. `stores so far` -> `stores`                               4 fail  §2 x3, §5b, §6
+ *   9. `GAS_MAX_INFLIGHT = 8` -> `19`                            1 fail  §9 — the v2.605 wave cap
+ *
+ * §4c and §4d were both written AFTER a browser run and a mutation run respectively said the code
+ * was wrong or the guard unfalsifiable. Neither was predicted from the desk.
  * ────────────────────────────────────────────────────────────────────── */

@@ -601,9 +601,22 @@ store not added in **yet**.
   fixed here: the v2.600 `err` and today-pending branches still count against all six `STORES`, so a
   filtered view can be told about a store it is not showing. Left alone deliberately — it is a
   48-hour-old guard and changing it is not this fix.*
-- **Nothing is claimed until a store has landed anywhere.** An amber "short" light over a shimmering
-  hero answers a question nobody has asked — the `$0` hero error again.
+- **Nothing is claimed while the hero SHIMMERS** — gated on `salesPending()`, the flag that decides
+  it. The statement qualifies a NUMBER; where there is no number the shimmer is the whole message,
+  and an amber "short" light beside it answers a question nobody has asked (the `$0` hero error
+  again). **The first version got this wrong and the BROWSER caught it, not a test**: a liveData-only
+  guard cannot see `salesPending`'s second clause — a today view whose landed stores are all
+  today-pending — and the marker read `1/6 stores so far` over a shimmer at t+2.4s of a cold load.
+  §4c of the test is that fixture.
 - **The number is never hidden or blanked.** A missing headline is worse than a labeled partial one.
+- **Measured in headless Chrome against the live backend, cold cache, 390pt viewport.** Shimmer and
+  no claim at 2.4s; `1/6 stores so far` in amber the moment a figure appeared at 3.6s, climbing
+  through `5/6` as $1,287 → $3,373; handed off to v2.600's `River pending` at 7.2s; **green with no
+  note at 12.1s on $4,263**. At **t+72s the 60-second poll set all twelve dots blinking again and
+  the hero stayed green on an unchanged total** — the re-poll case, live. A second run hit a real
+  bad-`/exec` load and escalated `3/6 so far` (amber) → `3/6 stores` (red) as three stores timed
+  out, which is the precedence rule holding under the failure it was written for. The mobile and
+  desktop hero blocks were compared on every sample and were identical every time.
 - `tests/hero_partial_total_test.js` — 34 assertions, EXECUTES the shipped `_heroLiveHtml_`,
   `getActiveStores` and `getPeriodTotals`. **Measured against `HEAD:index.html`: 27 pass, 7 fail**,
   and the sections that pass there are named in the file, because a test where everything fails

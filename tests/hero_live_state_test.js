@@ -52,12 +52,14 @@ function heroCtx({ state = {}, todayPending = [], landed = SIX,
     liveData: Object.fromEntries(landed.map(n => [n, { netSales: 1000 }])),
     activeStore: 'All',
     activeStoreSet: null,
+    activeDay: null,
+    _loadAllStoresInFlight: landed.length < SIX.length,
     laDay: () => TODAY,
     periodRange: () => ({ from: range.from, to: range.to }),
     toDateStr: d => d,
   };
   vm.createContext(ctx);
-  vm.runInContext([grab('viewIncludesToday_'), grab('getActiveStores'),
+  vm.runInContext([grab('viewIncludesToday_'), grab('getActiveStores'), grab('salesPending'),
                    grab('_heroLiveHtml_')].join('\n'), ctx);
   return ctx;
 }

@@ -5138,12 +5138,17 @@ function _heroLiveHtml_(syncTime, periodDay) {
    * Scoped to getActiveStores(), because a filtered view's headline is the sum of the stores it
    * shows — "4/6" under a one-store filter describes a number nobody is looking at.
    *
-   * Nothing is reported until at least one store has landed anywhere: that is the moment the hero
-   * stops shimmering (salesPending's first clause) and starts showing a figure. An amber "short"
-   * light over a shimmer answers a question nobody has asked — the $0-hero error again. */
+   * NOTHING IS CLAIMED WHILE THE HERO IS SHIMMERING — `salesPending()`, the same flag that decides
+   * it. This statement qualifies a NUMBER, so where there is no number the shimmer is already the
+   * whole message, and an amber "short" light beside it answers a question nobody has asked (the
+   * $0-hero error again). Caught in the browser, not in a test: on a TODAY view the hero shimmers
+   * for salesPending's SECOND clause — every landed store's today still missing — which an
+   * `Object.keys(liveData).length` guard does not see, and the marker read `1/6 stores so far`
+   * over a shimmer at t+2.4s of a cold load. The liveData check stays as well: it is what keeps a
+   * dead app (nothing loaded, nothing in flight) from reporting `0/6`. */
   const shown   = getActiveStores();
   const counted = shown.filter(n => liveData[n]);
-  const partial = Object.keys(liveData).length > 0 && counted.length < shown.length;
+  const partial = !salesPending() && Object.keys(liveData).length > 0 && counted.length < shown.length;
   let cls = '', note = '';
   if (failed.length) {
     // 'err' is the stronger statement — a store that failed outright is not merely today-pending.

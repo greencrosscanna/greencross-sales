@@ -730,17 +730,15 @@ windows take everything in flight at once (see "THE STALLS ARE NOT INDEPENDENT" 
 |---|---|---|---|---|
 | before, desktop | 26 (+4 GX Core) | 3.0s | 21.1s | 25.9s |
 | before, phone | 26 (+5 GX Core) | 2.7s | 11.6s | 42.2s |
-| after, phone — **simulated** | **1** in the opening wave, 6 deferred (year backfill) | 2.5s | **5.3s** | **10.7s** |
-| after, return visit | same | **on the first frame (<1.5s), labeled saved copy** | 5s | — |
+| after, phone — **deployed** (engine @284) | **1** in the opening wave, 7 deferred (year backfill, Gross Profit) | **2.0s — all six at once** | 2.0s (load done 4.4s) | **9.4s** |
+| after, return visit | same | **on the first frame (<1.5s), labeled saved copy** | as above | — |
 
-**"After" is a SIMULATION until the backend is deployed**, and says so: a throwaway copy of the page
-answered `action=bundle` from a fixture of REAL live responses captured seconds earlier, behind one
-real `/exec` round trip (`libversion`). Re-measure on the deployed route. First figures barely move —
-the first store's settled half already landed at ~2.7s; what moves is the tail, which is what the
-42-second reports were. **Against the current (pre-deploy) backend the new page still works** —
-measured: `bundle` answers "Unknown store", the load falls back piece by piece, all six stores land —
-but first figures drop to 4.8s because that failed read sits in front. **Deploy the backend before
-the page.** `tests/opening_bundle_test.js` — 92 assertions, executes both sides; twelve mutations,
+Measured on the deployed route: `bundle` answered in 1.9s, 24KB, every part `ok`, today's figures
+24s old. **The shape of the win is that the six stores arrive together**: before, the first store
+landed at ~2.7s and the rest trickled in over 10-20s; now all six land with the one answer. The
+remaining 4.4s "load done" is the aux awaits (GX Core's `published_goals`), not Sales. A pre-deploy
+browser run confirmed the fallback — the new page against the OLD backend loads piece by piece and
+all six stores land — at the cost of that one failed read in front (first figures 4.8s). `tests/opening_bundle_test.js` — 92 assertions, executes both sides; twelve mutations,
 each failing the assertion written for it.
 
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)

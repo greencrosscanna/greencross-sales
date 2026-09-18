@@ -225,7 +225,8 @@ console.log('\n8. Expenses-only aux no longer competes with the first paint');
   ok('loadExpBudgets is off the boot path', !/loadExpBudgets\(\)/.test(load));
   ok('loadExpenses is off the boot path',   !/loadExpenses\(\)/.test(load));
   // otherRevenue stays: the Income hero folds ATM and sublet into net sales, so it IS this tab's.
-  ok('loadOtherRevenue stays on it', /loadOtherRevenue\(\)/.test(load));
+  // Called with the opening snapshot's copy when there is one (2026-09-17) — still called on every load.
+  ok('loadOtherRevenue stays on it', /loadOtherRevenue\(/.test(load));
 
   ok('the Expenses tab loads its own budgets on entry',
      /function renderExpenses\(\)\s*\{\s*ensureExpBudgets\(\);/.test(HTML));

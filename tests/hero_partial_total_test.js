@@ -55,6 +55,7 @@ function ctxFor({ state = {}, todayPending = [], landed = [], filter = null, day
     STORES: SIX.map(n => ({ name: n, display: n })),
     _storeStateMap: state,
     _todayPending: new Set(todayPending),
+    _diskStores: new Set(),   // no saved-copy paint in these fixtures — see tests/opening_bundle_test.js
     liveData: Object.fromEntries(landed.map(n => [n, payload(NETS[n])])),
     liveDateMaps: {},
     allDailyData: {},

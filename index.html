@@ -1135,7 +1135,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   //                 set_recon, set_recon_assign, set_recon_config,
   //                 apply_budget, clear_budget
   window.GX_DEV_READS = [
-    'budget_proposal',
+    'budget_proposal', 'bundle',
     'cogs', 'cogs_dutchie', 'config', 'deposits', 'expbudgets', 'expense_breakdown', 'expenses', 'getdailygoals', 'goals',
     'inventory', 'libversion', 'login', 'otherrev', 'pace', 'period_goals', 'period_goals_range', 'ping', 'pnl', 'published_goals',
     'recon_config', 'revenue_detail',
@@ -1443,7 +1443,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.610';
+const APP_VERSION = 'v2.611';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2026,7 +2026,7 @@ function activeGoalRange() {
  * numbers because of one flaked fetch is exactly the silent wrong answer this whole change is
  * about. Nothing is cached client-side: the proxy caches each frozen period for 6h already.
  */
-async function loadPeriodGoalRange(from, to) {
+async function loadPeriodGoalRange(from, to, pre) {   // `pre`: the opening snapshot's answer, if it has one
   const key = from + '|' + to;
   if (pgLoaded.has(key)) return;
   pgLoaded.add(key);
@@ -2037,7 +2037,7 @@ async function loadPeriodGoalRange(from, to) {
        hangs. 3.9s warm for a YTD range today, and 42s before it was optimized, which is why the
        ceiling is 18s rather than the 12s its siblings get: it has to sit above a legitimately
        slow answer and below a hung one. See fetchStoresMeta for what a hang costs. */
-    const data = await gasFetchJson(
+    const data = pre || await gasFetchJson(
       `${proxyUrl}?action=period_goals_range&start=${encodeURIComponent(from)}` +
       `&end=${encodeURIComponent(to)}&token=${encodeURIComponent(getToken())}`, 2, 18000);
     if (!data.ok || !Array.isArray(data.periods)) { pgLoaded.delete(key); pgResolved.add(key); return; }
@@ -2167,6 +2167,7 @@ let _liveDataKey = null;
  *  becomes invisible to loadAllStores, or a stale period survives one. */
 function clearLiveData() {
   liveData = {}; _liveDataKey = null;
+  if (typeof _diskStores !== 'undefined') _diskStores.clear();   // nothing saved is on screen any more
   // There is nothing left to patch, so the next render has to mount the skeleton from scratch.
   // This is the ONLY path that should force that — see _invalidateDerivedCaches for why.
   _incomeMounted = false;
@@ -3221,6 +3222,129 @@ const LIVE_SNAPSHOT_MAXAGE_S = 600;   // the proxy clamps to the same 600 — DT
 let _nextLoadFresh = false;
 let _lastLoadAt = 0;
 
+/* ── THE OPENING SNAPSHOT — one call to open the app, and the last one painted before it lands ─────
+ *
+ * Measured 2026-09-17, cold: an open fired 30-31 /exec calls and the last one landed at 42s on a
+ * phone. The proxy now keeps the whole landing view — every store's settled month and today's
+ * figure, the store list, budget goals, today's period goals, pace and other revenue — in ONE
+ * snapshot a trigger rebuilds every five minutes (bundleBuild_ in the proxy). An OPEN reads it with
+ * `action=bundle` and each piece is handed to the loader that would otherwise have fetched it, so
+ * everything downstream — merging, today-pending, the dots, the hero — runs exactly as before.
+ *
+ *  - OPENS ONLY. A Refresh (the pill, pull-down, the desktop poll) asks for fresh numbers and keeps
+ *    the old path with the 90s maxage; a person who asked for new numbers is never handed a snapshot.
+ *  - PER STORE, AND PER HALF. A store the snapshot lacks, or whose today figure is older than the
+ *    600s an open accepts (LIVE_SNAPSHOT_MAXAGE_S — the same contract as `maxage`), asks for that
+ *    half itself. The snapshot can only remove requests, never figures.
+ *  - THE LAST GOOD SNAPSHOT IS PAINTED FROM DISK before anything is asked (paintSavedBundle_), for
+ *    today's view only, and says so: every store's dot blinks until the network replaces it and the
+ *    hero reads "saved copy" with the snapshot's real age. Leaderboard's paintStale.
+ *  - A snapshot with ANY failed part is used but never written to disk — Leaderboard's
+ *    _isErrorPayload. One entry carries one age; a half-true one on disk is worse than an older whole one. */
+const OPEN_BUNDLE_LS_ = 'gc_sales_open_bundle';   // under gc_sales_ so "Clear cache" sweeps it
+let _diskStores = new Set();                       // stores whose figure on screen came off disk
+
+function bundleIsErrorPayload_(b) {
+  if (!b || typeof b !== 'object' || b.ok === false || !b.parts || typeof b.parts !== 'object') return true;
+  for (const k of Object.keys(b.parts)) {
+    const p = b.parts[k];
+    if (!p || typeof p !== 'object' || p.ok === false) return true;
+  }
+  return false;
+}
+
+/* The snapshot describes TODAY in the CURRENT month. Any other view has no use for it. */
+function bundleFitsView_(b) {
+  if (!b || b.v !== 1 || !b.parts || b.today_pt !== laDay()) return false;
+  return b.month === `${activeYear}-${String(activeMonth).padStart(2, '0')}`;
+}
+
+function bundlePartData_(b, name) {
+  const p = b && b.parts && b.parts[name];
+  return p && p.ok && p.data != null ? p.data : null;
+}
+
+/* One store's two halves, for fetchMonthData. Today's half only if it is inside what an open
+ * accepts; an older one is dropped so that store asks for it — it is NOT painted as current. */
+function bundleStorePreset_(b, name) {
+  const sales = b && b.parts && b.parts.sales && b.parts.sales.data;
+  const e = sales && sales.stores && sales.stores[name];
+  if (!e || !e.settled || e.settled.phase !== 'settled') return null;
+  const asOf = e.live && Number(e.live.liveAsOf);
+  const live = asOf && Date.now() - asOf <= LIVE_SNAPSHOT_MAXAGE_S * 1000 ? e.live : null;
+  return { settled: e.settled, live: live };
+}
+
+async function fetchOpenBundle_() {
+  const proxyUrl = getProxyUrl();
+  if (!proxyUrl) return null;
+  try {
+    const b = await gasFetchJson(`${proxyUrl}?action=bundle&token=${encodeURIComponent(getToken())}`,
+                                 null, AUX_READ_CAPS_, GAS_PRIO.SCREEN);
+    if (b && b.error === 'Auth required') { salesLogout(); return null; }
+    if (!bundleFitsView_(b)) {
+      if (b && b.refreshScheduled) console.log('[bundle] no snapshot for today yet — a build was scheduled');
+      return null;
+    }
+    if (!bundleIsErrorPayload_(b)) {
+      try { localStorage.setItem(OPEN_BUNDLE_LS_, JSON.stringify(b)); } catch (e) {}
+    }
+    return b;
+  } catch (e) {
+    // Not an error the reader needs: every piece falls back to its own request.
+    console.warn('[bundle] unavailable, loading piece by piece:', e.message);
+    return null;
+  }
+}
+
+/* The day-scoped pieces the load would otherwise ask for once the stores land. */
+function applyBundleDayParts_(b) {
+  const day  = bundlePartData_(b, 'pg_day');
+  if (day && day.ok && day.goals && Object.keys(day.goals).length && !periodGoalsCache[b.today_pt]) {
+    periodGoalsCache[b.today_pt] = day.goals;
+  }
+  const pace = bundlePartData_(b, 'pace');
+  const at   = b.parts.pace && Number(b.parts.pace.as_of);
+  // Stamped with the time the fraction was COMPUTED, so paceFracsStale ages it honestly and
+  // loadPaceFracs re-asks once it is older than PACE_FRACS_TTL_MS.
+  if (pace && pace.fracs && Object.keys(pace.fracs).length && at && (paceFracs === null || at > paceFracsAt)) {
+    paceFracs = pace.fracs;
+    paceFracsAt = at;
+  }
+}
+
+/* Called in the boot block, before the first load. Paints the last whole snapshot for today's view
+ * so the reader has numbers on the first frame; the load that follows replaces them store by store. */
+function paintSavedBundle_() {
+  let b = null;
+  try { b = JSON.parse(localStorage.getItem(OPEN_BUNDLE_LS_) || 'null'); } catch (e) { return false; }
+  if (!bundleFitsView_(b) || bundleIsErrorPayload_(b)) return false;
+  if (Object.keys(liveData).length) return false;   // something newer is already on screen
+  const stores = (b.parts.sales.data || {}).stores || {};
+  let n = 0;
+  for (const s of STORES) {
+    const e = stores[s.name];
+    if (!e || !e.settled) continue;
+    const month = mergeStorePhases_(e.settled, e.live || null);
+    month.liveAsOf = e.live ? Number(e.live.liveAsOf) || null : null;
+    if (!e.live) _todayPending.add(s.name);
+    liveData[s.name] = month;
+    rebuildLiveDateMap(s.name);
+    mergeDailyData(s.name, month.daily);
+    _diskStores.add(s.name);
+    n++;
+  }
+  if (!n) return false;
+  _liveDataKey = activeYear + ':' + activeMonth;
+  const orev = bundlePartData_(b, 'otherrev');
+  if (orev && !otherRevData) { otherRevData = orev; otherRevAgeMs = null; otherRevTried = true; }
+  const range = bundlePartData_(b, 'pg_range');
+  if (range) loadPeriodGoalRange(b.today_pt, b.today_pt, range);   // runs synchronously with data in hand
+  applyBundleDayParts_(b);
+  try { render(); } catch (e) { console.error('[bundle] saved-copy paint failed:', e); }
+  return true;
+}
+
 function refreshLiveData(opts) {
   // Bail BEFORE touching the cache if a load is already running. Without this a second click wiped
   // liveData and cleared the cache, then loadAllStores() hit its own in-flight guard and returned
@@ -3563,7 +3687,7 @@ async function backfillDailyHistory(proxyUrl) {
   buildStatusGrid(_storeStateMap); // re-render status strip with sparklines now that allDailyData is populated
 }
 
-async function loadGoals() {
+async function loadGoals(pre) {   // `pre`: the opening snapshot's answer, if it has one
   // Key is goals_v2, not goals: the cached shape changed from a bare store→months map to one that
   // carries the year it describes, and a v1 entry read as v2 would look like "backend said nothing"
   // for up to its 24h TTL — i.e. the old bug, still live on every warm tab. A new key retires them.
@@ -3574,7 +3698,7 @@ async function loadGoals() {
   if (!proxyUrl) return;
   try {
     // Bounded: this is inside auxDataPromise, which loadAllStores awaits. See fetchStoresMeta.
-    const data = await gasFetchJson(
+    const data = pre || await gasFetchJson(
       `${proxyUrl}?action=goals&token=${encodeURIComponent(getToken())}`, 2, 12000);
     if (data.goals) {
       goals     = data.goals;
@@ -3586,7 +3710,7 @@ async function loadGoals() {
   }
 }
 
-async function fetchStoresMeta() {
+async function fetchStoresMeta(pre) {   // `pre`: the opening snapshot's answer, if it has one
   const proxyUrl = getProxyUrl();
   const token    = getToken();
   if (!proxyUrl || !token) return;
@@ -3620,7 +3744,7 @@ async function fetchStoresMeta() {
      * metadata stays applied and the poll lives. Two attempts at 12s keeps the whole aux block well
      * inside one poll interval, so a slow start cannot outlive the refresh that would fix it. */
     const url  = `${proxyUrl}?action=stores&token=${encodeURIComponent(token)}`;
-    const data = await gasFetchJson(url, 2, 12000);
+    const data = pre || await gasFetchJson(url, 2, 12000);
     if (!data.stores) { console.warn('fetchStoresMeta: unexpected response', JSON.stringify(data).slice(0, 200)); return; }
     if (data.stores.length > 0) {
       applyStoreMeta(data.stores);
@@ -3725,26 +3849,11 @@ async function loadAllStores() {
   localStorage.removeItem('gc_daily_acc');
   evictHistoricalSalesCache();
 
-  // Fire only Income-tab aux concurrently with stores — limits peak GAS connections on mobile.
-  const auxDataPromise = Promise.all([
-    fetchStoresMeta(),
-    loadGoals(), loadLeaderboardGoals(),
-    loadPeriodGoalRange(...activeGoalRange()),
-  ]);
-  /* otherRevenue only. `expbudgets` and `expenses` were fired here too, and the comment above them
-   * said what was wrong with that in its own words — "Expenses-tab only". They are paid by every
-   * load, on the Income tab, by everyone who never opens Expenses, and they are not free: measured
-   * on the live app 2026-09-06, expbudgets was the SLOWEST call in the boot wave at 8.8s, against
-   * 4.9-10.8s for the six store fetches it was competing with. Fire-and-forget makes a call
-   * invisible, not weightless. Both now load when the Expenses tab is first opened, which is the
-   * first moment anything reads them. otherRevenue stays: the Income hero folds ATM and sublet into
-   * net sales, so it IS this tab's data. */
-  loadOtherRevenue();
-
   // A re-poll of the SAME period keeps what is on screen and overwrites it store by store as the
   // answers land; only a period change starts from nothing. See _liveDataKey.
+  // (Moved above the snapshot read so the dots blink while it is in flight.)
   const loadKey = activeYear + ':' + activeMonth;
-  if (_liveDataKey !== loadKey) { liveData = {}; _liveDataKey = loadKey; }
+  if (_liveDataKey !== loadKey) { liveData = {}; _liveDataKey = loadKey; _diskStores.clear(); }
   const stateMap = Object.fromEntries(STORES.map(s => [s.name, 'loading']));
   buildStatusGrid(stateMap);
   pill('amber', 'Loading…');
@@ -3755,6 +3864,31 @@ async function loadAllStores() {
   const curYear = new Date().getFullYear();
   const curMo   = new Date().getMonth() + 1;
   const maxMo   = activeYear < curYear ? 12 : curMo; // all 12 for past years
+
+  /* AN OPEN READS THE SNAPSHOT FIRST — one request for what used to be ~20. Only an open (a Refresh
+   * wants fresh numbers) and only the current month (that is all the snapshot describes). Every
+   * piece it lacks falls through to its own request below, so a missing or partial snapshot costs
+   * time, never a figure. See OPEN_BUNDLE_LS_. */
+  const bundle = (!wantFresh && activeMonth === curMo && activeYear === curYear) ? await fetchOpenBundle_() : null;
+  const bRange = bundle && activeGoalRange()[0] === bundle.today_pt && activeGoalRange()[1] === bundle.today_pt
+               ? bundlePartData_(bundle, 'pg_range') : null;
+  if (bundle) applyBundleDayParts_(bundle);
+
+  // Fire only Income-tab aux concurrently with stores — limits peak GAS connections on mobile.
+  const auxDataPromise = Promise.all([
+    fetchStoresMeta(bundlePartData_(bundle, 'stores')),
+    loadGoals(bundlePartData_(bundle, 'goals')), loadLeaderboardGoals(),
+    loadPeriodGoalRange(...activeGoalRange(), bRange),
+  ]);
+  /* otherRevenue only. `expbudgets` and `expenses` were fired here too, and the comment above them
+   * said what was wrong with that in its own words — "Expenses-tab only". They are paid by every
+   * load, on the Income tab, by everyone who never opens Expenses, and they are not free: measured
+   * on the live app 2026-09-06, expbudgets was the SLOWEST call in the boot wave at 8.8s, against
+   * 4.9-10.8s for the six store fetches it was competing with. Fire-and-forget makes a call
+   * invisible, not weightless. Both now load when the Expenses tab is first opened, which is the
+   * first moment anything reads them. otherRevenue stays: the Income hero folds ATM and sublet into
+   * net sales, so it IS this tab's data. */
+  loadOtherRevenue(bundlePartData_(bundle, 'otherrev'));
 
   // Helper: fetch one month for one store, cache-aware. Retries once on transient failure.
   /* ONE PHASE OF ONE STORE-MONTH. The caller decides which halves to ask for. */
@@ -3805,8 +3939,12 @@ async function loadAllStores() {
    * A range that does not reach today has no live half at all, so it stays a single request and an
    * unchanged contract — which is also what every past month, the YTD walk and the compare-period
    * fetch keep using. */
-  async function fetchMonthData(store, year, month, _retry, onSettled) {
-    const cached = readSalesCache(store.name, year, month);
+  async function fetchMonthData(store, year, month, _retry, onSettled, preset) {
+    /* `preset` — this store's halves out of the opening snapshot (bundleStorePreset_). A half it
+     * carries is used IN PLACE OF its request and flows through exactly the same merge, pending and
+     * cache rules below; a half it lacks is asked for as always. A complete preset outranks the
+     * 10-minute month cache, which can only be older than the snapshot that was just read. */
+    const cached = (preset && preset.settled && preset.live) ? null : readSalesCache(store.name, year, month);
     // Only complete months are ever written, so a cache hit is never today-pending.
     if (cached) { stateMap[store.name] = 'ok'; _todayPending.delete(store.name); return cached; }
     const { from, to } = monthRange(month, year);
@@ -3831,8 +3969,8 @@ async function loadAllStores() {
       }
     }
 
-    const settledP = fetchPhase(store, from, to, 'settled');
-    const liveP    = fetchPhase(store, from, to, 'live');
+    const settledP = preset && preset.settled ? Promise.resolve(preset.settled) : fetchPhase(store, from, to, 'settled');
+    const liveP    = preset && preset.live    ? Promise.resolve(preset.live)    : fetchPhase(store, from, to, 'live');
     /* PAINT THE MONTH THE MOMENT IT EXISTS. The settled half lands in ~2-4s; the live half can take
      * 20+ on a bad evening, and the row used to wait for both. Handed to the caller as a month
      * without today, with the store marked today-pending — so the dot blinks and a today-only view
@@ -3948,8 +4086,10 @@ async function loadAllStores() {
           mergeDailyData(store.name, month.daily);
           try { render(); } catch (e) { console.error('[render] early paint failed:', e); }
         };
-        const data = await fetchMonthData(store, activeYear, activeMonth, false, onSettled);
+        const data = await fetchMonthData(store, activeYear, activeMonth, false, onSettled,
+                                          bundleStorePreset_(bundle, store.name));
         liveData[store.name] = data;
+        _diskStores.delete(store.name);   // the figure on screen is now this load's, not the saved copy's
         rebuildLiveDateMap(store.name);
         mergeDailyData(store.name, data.daily);
       } catch (e) {
@@ -5281,6 +5421,14 @@ function _heroLiveHtml_(syncTime, periodDay) {
     // 'err' is the stronger statement — a store that failed outright is not merely today-pending.
     cls  = ' failed';
     note = ` · ${names.length - failed.length}/${names.length} stores`;
+  } else if (shown.some(n => _diskStores.has(n))) {
+    /* THE FIGURE IS LAST VISIT'S, PAINTED FROM DISK WHILE THIS ONE LOADS (paintSavedBundle_). The
+     * clock beside it is already the pull time; this says in words that it is a saved copy and how
+     * old, so an hour-old total is never read as the current one. Clears store by store as the
+     * load replaces each. */
+    const asOf = liveAsOf_();
+    cls  = ' stale';
+    note = ' · saved copy' + (asOf ? ', ' + fmtCacheAgo_(Date.now() - asOf) : '');
   } else if (partial) {
     /* A COUNT, not a bare marker, and the same vocabulary the red branch uses for the worse case.
      * "so far" is what separates it from that branch's verdict: 5/6 means one store is not coming,
@@ -6606,7 +6754,7 @@ function applyExpBudgets_(payload, ageMs) {
   expBudgetsAgeMs    = ageMs;
 }
 
-async function loadOtherRevenue() {
+async function loadOtherRevenue(pre) {   // `pre`: the opening snapshot's answer, if it has one
   const cached = readCache('otherrev');
   if (cached) { otherRevData = cached; otherRevAgeMs = null; otherRevTried = true; return; }
   const proxyUrl = getProxyUrl();
@@ -6615,7 +6763,7 @@ async function loadOtherRevenue() {
     /* SCREEN lane — the hero folds ATM and sublet into net sales, so this IS first-paint data and
        is deliberately NOT demoted. It is in the queue so that the cap means what it says: a
        request outside the pool is a request the pool cannot count. */
-    const data = await gasFetchJson(
+    const data = pre || await gasFetchJson(
       `${proxyUrl}?action=otherrev&token=${encodeURIComponent(getToken())}`,
       null, AUX_READ_CAPS_, GAS_PRIO.SCREEN);   // not gasGate_ — see loadPeriodGoals
     if (data.error) throw new Error(data.error);
@@ -10322,7 +10470,11 @@ window.gcShowUpdate = gcShowUpdate; window.gcCheckVersion = gcCheckVersion;
  * skipped. Ordering alone would have fixed that specific throw; the try/catch is what stops the NEXT
  * decoration from doing the same thing. Painting a name chip is not worth a blank dashboard. */
 if (GC_SALES_AUTH.isAuthed()) {
-  try { loadAllStores(); } catch (e) { console.error('[boot] loadAllStores threw synchronously:', e); }
+  // Last visit's snapshot on the first frame, labeled as a saved copy — see OPEN_BUNDLE_LS_. Guarded
+  // like everything else here: a bad entry on disk must never stop the load below.
+  try { paintSavedBundle_(); } catch (e) { console.error('[boot] saved snapshot failed to paint:', e); }
+  var _bootLoad = null;
+  try { _bootLoad = loadAllStores(); } catch (e) { console.error('[boot] loadAllStores threw synchronously:', e); }
 
   try {
     var _initSession = GC_SALES_AUTH.load();
@@ -10334,7 +10486,12 @@ if (GC_SALES_AUTH.isAuthed()) {
   } catch (e) { console.error('[boot] user chrome failed to paint:', e); }
 
   try { startSalesHeartbeat(); } catch (e) { console.error('[boot] heartbeat failed to start:', e); }
-  try { loadWhatsNewSales(); }  catch (e) { console.error('[boot] what\'s-new failed to load:', e); }
+  // After the first load, not beside it: the release notes are nobody's first paint. It is a GX Core
+  // call, outside this app's pool, so waiting is the only way to keep it out of the opening wave.
+  var _wnBoot = function () {
+    try { loadWhatsNewSales(); } catch (e) { console.error('[boot] what\'s-new failed to load:', e); }
+  };
+  if (_bootLoad && typeof _bootLoad.then === 'function') _bootLoad.then(_wnBoot, _wnBoot); else _wnBoot();
 } else {
   showLoginScreen();
 }

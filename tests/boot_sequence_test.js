@@ -69,7 +69,8 @@ console.log('\n2. the data load must not sit behind anything that can throw');
 console.log('\n3. every decoration is individually guarded');
 {
   ok('loadAllStores() itself is wrapped, so even a synchronous throw is logged not swallowed',
-     /try\s*\{\s*loadAllStores\(\);\s*\}\s*catch/.test(boot));
+     // The promise is kept (2026-09-17) so what's-new can wait for the first load; still wrapped.
+     /try\s*\{\s*(?:_bootLoad\s*=\s*)?loadAllStores\(\);\s*\}\s*catch/.test(boot));
   ok('the user chrome (tray, bug fab, revenue visibility) is wrapped',
      /paintSalesUserTray\(\)[\s\S]{0,400}?\}\s*catch\s*\([\s\S]{0,120}?\[boot\] user chrome/.test(boot));
   ok('the heartbeat is wrapped', /try\s*\{\s*startSalesHeartbeat\(\);\s*\}\s*catch/.test(boot));

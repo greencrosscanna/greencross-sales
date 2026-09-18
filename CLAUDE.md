@@ -683,6 +683,64 @@ place the question is asked; the cache key went v2 → v3 so $0 entries were ret
 bucketed as "Unknown" — that card stays hidden, as it always has been. `getTxFields` / `getTxDetail`
 (debug probes) still say `includeItems`; left alone. `bg_refresh_test.js` pins the name.
 
+### Opening the app is ONE read of a snapshot the trigger built (v2.611, 2026-09-17)
+
+Asked by the hub after the suite-wide performance review: *"make the Sales app open from a
+server-built snapshot in one call, instead of ~35 live backend calls."* Inventory and Leaderboard
+open fast for one reason — a load READS what a trigger built and never BUILDS inside the request.
+Every request in the opening wave is a separate exposure to an `/exec` outage window, and the
+windows take everything in flight at once (see "THE STALLS ARE NOT INDEPENDENT" below).
+
+- **Server: `bgRefreshTodayTick` now refreshes today, THEN builds the snapshot** (`bundleRefresh_`
+  → `bundleBuild_`), each in its own try. Same trigger, same 5 minutes; outside store hours it
+  rebuilds at most ~hourly. Stored always-chunked under `sbundle_v1` (Leaderboard's
+  `saveChunkedCache_`, not `cacheSet_` — that helper's plain/chunked crossover would read a shrunk
+  snapshot back as the older, larger one). Measured real size: **22KB**.
+- **Every piece is built by the function its own route calls** — `getStoreSales_(…,'settled')`,
+  `getStoresMeta_`, `getGoals`, `getPeriodGoalsRange_(today,today)`, `getPeriodGoalsForDate_`,
+  `getPacingFracs_`, `getOtherRevenue`. The one exception is today's half, `bundleLiveHalf_`, which
+  reads the `dtoday_v3` entry and NEVER pulls (the viewer path would retry-pull on a miss, the
+  retry `bgRefreshToday_` refuses to spend). Its shape is required to equal `getStoreSales_`'s
+  phase=live reply by a test that runs both over one entry.
+- **Per part `as_of`; a failed part keeps its last good copy with its ORIGINAL age** (`stale`,
+  `error`), never blanked by a sibling and never re-stamped. Day-scoped parts (pace, both period
+  goal parts, today) are not carried across midnight — yesterday's pace is a different answer, not a
+  stale copy. **An empty settled month is a failure here**: `getStoreSales_` degrades a GX Core
+  hiccup to zero rows so a live request can still show today; stored, that is a near-$0 month served
+  for hours.
+- **`?action=bundle` reads, never builds.** Missing → `bundle_missing` and a one-off trigger
+  (`bundleKickRun`, throttled 2 min in the shared cache — Inventory's `force=1` semantics). Behind
+  the session gate, read-only. `?action=bgrefresh&op=bundle&secret=…` builds one now; `op=status`
+  now reports `bundle`.
+- **Client: an OPEN reads it; a Refresh never does.** Each part is handed to the loader that would
+  have fetched it (`pre` argument), and each store's halves go into `fetchMonthData` as `preset`, so
+  merge / today-pending / dots / hero are untouched. **Per store and per half:** a today figure older
+  than `LIVE_SNAPSHOT_MAXAGE_S` (600 — the same number as the server's maxage clamp, tested) is
+  dropped and that store asks for today itself. A missing snapshot costs one extra call, never a
+  figure.
+- **Painted from disk on the first frame** (`paintSavedBundle_`, today's view only). Dots blink and
+  the hero reads **"saved copy, N min ago"** in amber until the load replaces each store
+  (`_diskStores`). A snapshot with ANY `ok:false` part is used but never written to disk —
+  Leaderboard's `_isErrorPayload`.
+- **What's New waits for the first load** — it was a GX Core call in the opening wave.
+
+**Measured in the browser, live backend, cold browser cache, 2026-09-17 ~19:00 PT:**
+
+| | calls to this app's /exec | first figures | all six stores | last request done |
+|---|---|---|---|---|
+| before, desktop | 26 (+4 GX Core) | 3.0s | 21.1s | 25.9s |
+| before, phone | 26 (+5 GX Core) | 2.7s | 11.6s | 42.2s |
+| after, phone — **deployed** (engine @284) | **1** in the opening wave, 7 deferred (year backfill, Gross Profit) | **2.0s — all six at once** | 2.0s (load done 4.4s) | **9.4s** |
+| after, return visit | same | **on the first frame (<1.5s), labeled saved copy** | as above | — |
+
+Measured on the deployed route: `bundle` answered in 1.9s, 24KB, every part `ok`, today's figures
+24s old. **The shape of the win is that the six stores arrive together**: before, the first store
+landed at ~2.7s and the rest trickled in over 10-20s; now all six land with the one answer. The
+remaining 4.4s "load done" is the aux awaits (GX Core's `published_goals`), not Sales. A pre-deploy
+browser run confirmed the fallback — the new page against the OLD backend loads piece by piece and
+all six stores land — at the cost of that one failed read in front (first figures 4.8s). `tests/opening_bundle_test.js` — 92 assertions, executes both sides; twelve mutations,
+each failing the assertion written for it.
+
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
 
 Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:

@@ -49,6 +49,9 @@ function heroCtx({ state = {}, todayPending = [], landed = SIX,
     STORES: SIX.map(n => ({ name: n, display: n })),
     _storeStateMap: state,
     _todayPending: new Set(todayPending),
+    // Stores painted off disk (paintSavedBundle_, 2026-09-17). None here: every fixture in this
+    // file is a network-landed total. tests/opening_bundle_test.js covers the saved-copy branch.
+    _diskStores: new Set(),
     liveData: Object.fromEntries(landed.map(n => [n, { netSales: 1000 }])),
     activeStore: 'All',
     activeStoreSet: null,

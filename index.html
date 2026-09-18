@@ -602,6 +602,28 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 .ic-hero-live.stale .ic-hero-live-dot{background:var(--amber)}
 .ic-hero-live.failed{color:var(--red)}
 .ic-hero-live.failed .ic-hero-live-dot{background:var(--red)}
+/* It is a button now (tap = refresh). Reset the UA chrome so it still reads as a status line, and
+   give it a finger-sized hit area without moving the text. */
+button.ic-hero-live{background:none;border:0;font-family:inherit;line-height:inherit;cursor:pointer;
+  padding:8px 0 8px 10px;margin:-8px 0 -8px -10px;-webkit-tap-highlight-color:transparent}
+button.ic-hero-live:active{opacity:.6}
+/* While a load runs, the dot blinks fast — the same "not final yet" signal as a store's row dot. */
+body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
+/* Pull-to-refresh indicator, phones only. Drawn over the native rubber-band, never instead of it. */
+#ptr{position:fixed;left:50%;top:calc(env(safe-area-inset-top, 0px) + 6px);z-index:60;
+  width:34px;height:34px;border-radius:50%;background:var(--card-2);border:1px solid var(--border-strong);
+  display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:16px;
+  opacity:0;transform:translate(-50%,-48px);pointer-events:none;
+  transition:transform .18s ease-out,opacity .18s ease-out;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+#ptr .ptr-arrow{transition:transform .15s}
+#ptr.armed{color:var(--green)}
+#ptr.armed .ptr-arrow{transform:rotate(180deg)}
+#ptr .ptr-spin{display:none;width:14px;height:14px;border-radius:50%;border:2px solid var(--green);
+  border-right-color:transparent;animation:spin .7s linear infinite}
+#ptr.busy{opacity:1;transform:translate(-50%,24px);color:var(--green)}
+#ptr.busy .ptr-arrow{display:none}
+#ptr.busy .ptr-spin{display:block}
+@media (prefers-reduced-motion: reduce){#ptr .ptr-spin{animation:none}body.live-busy .ic-hero-live-dot{animation:none;opacity:.5}}
 .ic-hero-val{font-size:38px;font-weight:500;color:var(--text);line-height:1.05;letter-spacing:-.01em}
 .ic-hero-bar{position:relative;height:6px;margin:12px 0 8px}
 .ic-hero-foot{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
@@ -1122,6 +1144,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
 </script>
 </head>
 <body>
+<div id="ptr" aria-hidden="true"><span class="ptr-arrow">&#8595;</span><span class="ptr-spin"></span></div>
 <!-- ── Chrome ─────────────────────────────────────────────────────────────────────────────────
      Was a 264px sidebar. Now the shared top nav, so this app reads like the rest of the suite.
      It sits OUTSIDE .w deliberately: .w is a centered max-width wrapper, and a bar rendered inside
@@ -1420,7 +1443,7 @@ input.gxnum.pct{width:64px;text-align:center;font-size:17px;font-weight:700}
   }
 })();
 
-const APP_VERSION = 'v2.608';
+const APP_VERSION = 'v2.609';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -3172,13 +3195,40 @@ async function refreshDutchieData() {
 function setLiveBusy(on) {
   const el = document.getElementById('dsk-live-pill');
   if (el) el.classList.toggle('busy', !!on);
+  // On <body>, not on the hero: the hero is rebuilt by every progressive render during a load, and a
+  // class set on the old node would vanish with it. The pull-to-refresh indicator stays up (spinning)
+  // until the load it started is done.
+  document.body.classList.toggle('live-busy', !!on);
+  const p = document.getElementById('ptr');
+  if (p) {
+    p.classList.toggle('busy', !!on && _ptrPulled);
+    if (!on) { _ptrPulled = false; p.style.transform = ''; p.style.opacity = ''; p.classList.remove('armed'); }
+  }
 }
+let _ptrPulled = false;   // the running load was started by a pull, so its indicator spins
 
-function refreshLiveData() {
+/* HOW FRESH today's figure must be for THIS load.
+ *
+ * Sky, 2026-09-17: "when i open the sales app it shows me the latest details, which might be a few
+ * minutes old". The server keeps today's figure warm on a timer (bgRefreshToday_ in the proxy), so a
+ * load that is merely OPENING the app asks with maxage and reads that snapshot instead of waiting on
+ * a live Dutchie pull. A Refresh — the pill, pull-to-refresh, the desktop poll — asks for the 90s
+ * default, because a person who asked for new numbers must not be handed the old ones.
+ *
+ * Read and cleared once per load, at its start, so a flag set by one Refresh cannot leak into the
+ * next open. */
+const LIVE_SNAPSHOT_MAXAGE_S = 600;   // the proxy clamps to the same 600 — DTODAY_SNAPSHOT_S_
+let _nextLoadFresh = false;
+let _lastLoadAt = 0;
+
+function refreshLiveData(opts) {
   // Bail BEFORE touching the cache if a load is already running. Without this a second click wiped
   // liveData and cleared the cache, then loadAllStores() hit its own in-flight guard and returned
   // immediately — leaving the dashboard blank until the first load happened to finish.
   if (_loadAllStoresInFlight) return;
+  // Fresh unless the caller says a snapshot will do. `opts` is an Event when this is bound as a
+  // click handler, and a click is a person asking — so only an explicit false turns it off.
+  _nextLoadFresh = !(opts && opts.fresh === false);
   // Bust the current month AND whatever month/year is being VIEWED, so Refresh always re-fetches what's on
   // screen — including a past month whose GX Core numbers were corrected (retroactive returns / net-definition
   // re-pull). Historical re-fetch is a cheap GX Core cache read, not live Dutchie.
@@ -3296,6 +3346,21 @@ function scheduleAutoRefresh() {
     // "Live" pill while polling nothing — pace only moved when a tab switch happened to refresh it.
     if (_loadAllStoresInFlight || document.hidden) return;
     if (activeDay && activeDay !== toDateStr(new Date())) return; // historical days stay static
+    /* PHONES DO NOT POLL. Sky, 2026-09-17: "we could also remove the polling on mobile and replace
+     * it with the option to refresh" — pull down, or tap the live status in the hero. Every phone
+     * left open was twelve /exec calls a minute against a hop that stalls under load, for figures
+     * he reads at a glance.
+     *
+     * The tick survives on a phone for ONE job: recovering a load that came back incomplete, which
+     * is the same carve-out quiet hours make and the same predicate — a store that failed or whose
+     * today never landed. Without it, "only Center has loaded" would sit there until he pulled. */
+    if (manualRefreshMode_() && !inQuietHours()) {
+      if (!quietRecoveryNeeded_()) { _quietRecoveryTries = 0; return; }
+      if (_quietRecoveryTries >= QUIET_RECOVERY_MAX_) return;
+      _quietRecoveryTries++;
+      refreshLiveData();
+      return;
+    }
     if (inQuietHours()) {                                         // stores are shut — see above
       // Skip the tick only when there is nothing left to recover; see quietRecoveryNeeded_.
       if (!quietRecoveryNeeded_()) { _quietRecoveryTries = 0; paintQuietPill(); return; }
@@ -3312,6 +3377,15 @@ function clearAutoRefresh() {
   if (_autoRefreshTimer) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
 }
 
+// Phone = no poll, manual refresh. Same breakpoint as every other phone/desktop split in this file.
+function manualRefreshMode_() { return _pSwipeNarrow(); }
+
+/* Coming back to the app on a phone IS opening it — he switches away and back far more often than
+ * he cold-starts it. So a return after a couple of minutes re-reads the server's snapshot (cheap: a
+ * cache read, not a Dutchie pull) rather than showing whatever was there when he left. A quick
+ * app-switch inside that window reloads nothing. */
+const RESUME_RELOAD_MS_ = 2 * 60 * 1000;
+
 // Pause when tab goes to background; catch up immediately on return
 document.addEventListener('visibilitychange', function() {
   if (document.hidden) {
@@ -3320,6 +3394,9 @@ document.addEventListener('visibilitychange', function() {
     // Returning to the tab overnight is still the unattended poll this pauses — catching up would
     // just fetch the same closed-store numbers. Say so instead; Refresh is right there if wanted.
     if (inQuietHours()) paintQuietPill();
+    else if (manualRefreshMode_()) {
+      if (Date.now() - _lastLoadAt > RESUME_RELOAD_MS_) refreshLiveData({ fresh: false });
+    }
     else refreshLiveData();   // immediate catch-up refresh
     scheduleAutoRefresh();    // then resume the timer either way, so 08:00 picks itself up
   }
@@ -3620,6 +3697,8 @@ function mergeStorePhases_(settled, live) {
 async function loadAllStores() {
   if (_loadAllStoresInFlight) return;          // prevent double-tap race
   _loadAllStoresInFlight = true;
+  const wantFresh = _nextLoadFresh;            // see LIVE_SNAPSHOT_MAXAGE_S
+  _nextLoadFresh = false;
   setLiveBusy(true);
   /* Preserve the scroll position across a refresh — but ONLY against the app's own relayout, never
    * against the reader. This was an unconditional scrollTo at the end of the load, and a load takes
@@ -3682,6 +3761,7 @@ async function loadAllStores() {
   async function fetchPhase(store, from, to, phase) {
     const url = `${proxyUrl}?store=${encodeURIComponent(store.name)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
               + (phase ? `&phase=${encodeURIComponent(phase)}` : '')
+              + (phase === 'live' && !wantFresh ? `&maxage=${LIVE_SNAPSHOT_MAXAGE_S}` : '')
               + `&token=${encodeURIComponent(getToken())}${serverBypassParam()}`;
     // gasFetchJson, not a bare fetch: it BOUNDS the wait and retries the transport. The bare
     // version had no timeout, so a store whose /exec bounced sat unresolved — no error, no state
@@ -3797,6 +3877,7 @@ async function loadAllStores() {
     if (!split) {
       stateMap[store.name] = 'ok';
       _todayPending.delete(store.name);
+      sRes.value.liveAsOf = Date.now();
       writeSalesCache(store.name, year, month, sRes.value);
       return sRes.value;
     }
@@ -3806,6 +3887,10 @@ async function loadAllStores() {
 
     if (lRes.status === 'fulfilled') {
       _todayPending.delete(store.name);
+      /* When today's figure was PULLED, not when it arrived here — a snapshot can be minutes old by
+       * design, and the hero says so. Carried on the month itself so a localStorage hit keeps it. A
+       * backend that predates the field gets arrival time, which is what the hero showed before. */
+      merged.liveAsOf = Number(lRes.value.liveAsOf) || Date.now();
       // Only a COMPLETE month is cached. A settled-only answer written here would be served back
       // for the whole TTL, so a single stalled hop would cost today's sales for ten minutes rather
       // than until the next poll — turning a self-healing miss into a sticky one.
@@ -3909,6 +3994,7 @@ async function loadAllStores() {
   }
 
   updateCacheStatus();
+  _lastLoadAt = Date.now();
   _bdHoldOrder = false;           // the list settles ONCE, here, on complete data
   render();
   refreshCompare();               // no-op unless compare is on and its range actually moved
@@ -5209,11 +5295,108 @@ function _heroLiveHtml_(syncTime, periodDay) {
     // Named while one name fits; a count once it does not. The blinking row dot says which either way.
     note = pend.length === 1 ? ` · ${pend[0]} pending` : ` · ${pend.length} stores pending`;
   }
-  return `<div class="ic-hero-live${cls}">
+  /* A BUTTON: tapping it refreshes. Sky, 2026-09-17 — phones no longer poll, so refreshing is his to
+   * ask for, "by clicking the top right status indicator" or by pulling down. */
+  return `<button type="button" class="ic-hero-live${cls}" onclick="manualRefresh_()" aria-label="Refresh sales">
         <div class="ic-hero-live-dot"></div>
         <span>${syncTime}${tail}${note}</span>
-      </div>`;
+      </button>`;
 }
+
+/* WHEN TODAY'S FIGURE WAS PULLED — the oldest store's, since the total is only as current as its
+ * stalest part. The hero used to print the time it RENDERED, which was always "now" and so claimed
+ * every number on screen was up to the minute. With the server's snapshot that can be ten minutes
+ * off, and a clock that lies about it is worse than no clock. Null when the view does not include
+ * today (nothing live in it) or nothing has landed yet; the caller falls back to now. */
+function liveAsOf_() {
+  if (!viewIncludesToday_()) return null;
+  let oldest = null;
+  for (const n of getActiveStores()) {
+    const t = liveData[n] && Number(liveData[n].liveAsOf);
+    if (t && (oldest === null || t < oldest)) oldest = t;
+  }
+  return oldest;
+}
+
+/* A system haptic tick. navigator.vibrate is absent on iOS Safari, which is the phone this is for;
+ * there, toggling a native `switch` checkbox produces one (iOS 18+). Both are best-effort and silent
+ * on failure — a refresh must never depend on a buzz. Must be called from inside a user gesture. */
+function haptic_() {
+  try { if (navigator.vibrate && navigator.vibrate(10)) return; } catch (e) {}
+  try {
+    let lbl = document.getElementById('gx-haptic');
+    if (!lbl) {
+      lbl = document.createElement('label');
+      lbl.id = 'gx-haptic';
+      lbl.setAttribute('aria-hidden', 'true');
+      lbl.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
+      const inp = document.createElement('input');
+      inp.type = 'checkbox';
+      inp.setAttribute('switch', '');
+      inp.tabIndex = -1;
+      lbl.appendChild(inp);
+      document.body.appendChild(lbl);
+    }
+    lbl.click();
+  } catch (e) {}
+}
+
+// A person asking for new numbers: tap on the hero status, or a pull past the threshold.
+function manualRefresh_() {
+  if (_loadAllStoresInFlight) return;
+  haptic_();
+  refreshLiveData();
+}
+
+/* PULL TO REFRESH — phones only (manualRefreshMode_), from the very top of the page.
+ *
+ * Never preventDefault: the native rubber-band stays, so the page feels like every other iOS list and
+ * a scroll can never be swallowed. The indicator is drawn on top of it. Three things end a pull
+ * before it counts: a mostly-SIDEWAYS drag (the hero's period swipe owns that), a start inside an
+ * element that is itself scrolled (pulling down there scrolls it, it is not a refresh), and the page
+ * not being at the top. */
+const PTR_ARM_PX_ = 70;
+let _ptr = null;
+function _ptrEl() { return document.getElementById('ptr'); }
+function _ptrPaint(dy, armed) {
+  const el = _ptrEl();
+  if (!el) return;
+  const y = Math.min(dy, PTR_ARM_PX_ * 1.4);
+  el.style.transform = `translate(-50%, ${Math.round(y * 0.6)}px)`;
+  el.style.opacity = String(Math.min(1, dy / PTR_ARM_PX_));
+  el.classList.toggle('armed', !!armed);
+}
+function _ptrHide() {
+  const el = _ptrEl();
+  if (!el || el.classList.contains('busy')) return;
+  el.style.transform = ''; el.style.opacity = ''; el.classList.remove('armed');
+}
+function _ptrInScrolledBox(node) {
+  for (let n = node; n && n !== document.body && n.nodeType === 1; n = n.parentElement) {
+    if (n.scrollTop > 0) return true;
+  }
+  return false;
+}
+document.addEventListener('touchstart', e => {
+  _ptr = null;
+  if (!manualRefreshMode_() || e.touches.length !== 1 || window.scrollY > 0) return;
+  if (_loadAllStoresInFlight || _ptrInScrolledBox(e.target)) return;
+  if (!document.getElementById('main-content') || !getToken()) return;   // nothing to refresh yet
+  _ptr = { x: e.touches[0].clientX, y: e.touches[0].clientY, dy: 0 };
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  if (!_ptr) return;
+  const dx = e.touches[0].clientX - _ptr.x, dy = e.touches[0].clientY - _ptr.y;
+  if (dy <= 0 || Math.abs(dx) > dy || window.scrollY > 0) { _ptr = null; _ptrHide(); return; }
+  _ptr.dy = dy;
+  _ptrPaint(dy, dy >= PTR_ARM_PX_);
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  const p = _ptr; _ptr = null;
+  if (p && p.dy >= PTR_ARM_PX_ && !_loadAllStoresInFlight) { _ptrPulled = true; manualRefresh_(); }
+  else _ptrHide();
+}, { passive: true });
+document.addEventListener('touchcancel', () => { _ptr = null; _ptrHide(); }, { passive: true });
 
 function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, under, opts) {
   const o = opts || {};
@@ -5223,7 +5406,7 @@ function _incomeHeroInnerHtml(net, periodGoal, goalPct, pacingPct, isClosed, und
   const periodDay   = !activeDay && !activeWeek && activeMonth > 0 && !isClosed &&
                       activeYear === today.getFullYear() && activeMonth === today.getMonth() + 1
                       ? `day ${dayOfMonth} of ${daysInMo}` : '';
-  const syncTime    = today.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const syncTime    = new Date(liveAsOf_() || today).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   const paceRatio   = pacingPct > 0 ? goalPct / pacingPct * 100 : (goalPct > 0 ? 100 : 0);
   const barW        = Math.min(goalPct * THRESHOLDS.GOAL_BAR_FILL_RATIO, 100);
   const onPace      = paceRatio >= PACE_GREEN;

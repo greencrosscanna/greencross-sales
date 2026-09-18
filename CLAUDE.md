@@ -631,6 +631,46 @@ the only device any of them came from — could not say which stores were short.
 tell you what is wrong with it turns every report into a guess**, and this file's whole method is
 the opposite of guessing.
 
+## Phones don't poll; opening the app reads a server snapshot (v2.609, 2026-09-17)
+
+Sky: *"pull the sales numbers when there's no load, store that into cache, then when i open the sales
+app it shows me the latest details, which might be a few minutes old... remove the polling on mobile
+and replace it with the option to refresh, either with a pull down haptic or by clicking the top
+right status indicator."*
+
+- **Server: `bgRefreshTodayTick` runs every 5 min during store hours (08:00–22:15 PT)** and re-pulls
+  any store whose today entry is older than 240s — all due stores in ONE `UrlFetchApp.fetchAll`, one
+  attempt, no retry loop. Parallel on purpose: trigger runtime is a daily quota shared by every GX
+  script on sky@, and six sequential pulls every 5 minutes could spend hours of it.
+  **Install / inspect / switch off:** `?action=bgrefresh&op=install|status|remove|run&secret=…`
+  (`run&force=1` ignores store hours). `status` reports trigger count, last run and each store's
+  entry age.
+- **One cache entry, two thresholds.** `dtoday_v2_<store>_<day>` carries `as_of` (pull start) and is
+  kept 20 min. A caller's `maxage` decides what it accepts: default **90s** (poll, Refresh — the old
+  contract), up to **600s** for an open. Clamped at 600 server-side (`DTODAY_SNAPSHOT_S_`), and the
+  client's `LIVE_SNAPSHOT_MAXAGE_S` must match — `tests/manual_refresh_test.js` compares them.
+- **A viewer joining an in-flight pull only accepts an answer NEWER than the one it rejected.**
+  Entries now outlive a pull, so "any cache hit" during the wait would hand back the stale figure.
+  The marker holds the pull's start time, which is the `as_of` its answer carries.
+- **Client: a load is "fresh" only when a person or the desktop poll asked.** `refreshLiveData()` with
+  no args (or an Event) is fresh; `{fresh:false}` is an open. Boot and period navigation are opens.
+  The flag is read and cleared once at the top of `loadAllStores`.
+- **Phones: the 60s tick survives for RECOVERY ONLY** — same predicate and cap as the overnight
+  pause (`quietRecoveryNeeded_`, `QUIET_RECOVERY_MAX_`). Without it, "only Center loaded" would sit
+  until he pulled. Returning to the app after 2+ minutes re-reads the snapshot (`RESUME_RELOAD_MS_`).
+- **Ways to ask:** the hero's status (top right) is a `<button>` → `manualRefresh_()`; pull-to-refresh
+  from the top of the page past 70px. Never `preventDefault` — the native rubber-band stays. A
+  sideways drag, a start inside a scrolled box, or a page not at the top cancels it.
+- **Haptic on iOS is a hack, and best-effort:** Safari has no `navigator.vibrate`, so `haptic_()`
+  clicks a hidden `<input type=checkbox switch>` label (iOS 18+). If it stops buzzing after an iOS
+  update, the refresh still works — do not "fix" it by gating the refresh on it.
+- **The hero clock is when the data was PULLED** (`liveAsOf_`, oldest store), not when it rendered.
+  It used to print "now", which would claim a 9-minute-old snapshot was current.
+- Tests: `bg_refresh_test.js` (36, executes the shipped trigger then serves its output through the
+  real `dutchieTodayFetch_`), `intraday_cache_test.js` (45), `manual_refresh_test.js`,
+  `quiet_recovery_test.js` §6b. Mutation-verified: the stale-answer guard, the marker cleanup, the
+  maxage condition.
+
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
 
 Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:

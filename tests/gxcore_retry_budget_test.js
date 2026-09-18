@@ -105,7 +105,7 @@ const ctx = {
 vm.createContext(ctx);
 vm.runInContext(
   (mBudget ? mBudget[0].trim() + '\n' : '') +
-  [grab('gxDeploySecret_'), grab('gxRetryHold_'), grab('gxDutchieGet_'), grab('gxCoreRoute_'),
+  [grab('gxDeploySecret_'), grab('gxRetryHold_'), grab('gxDutchieQs_'), grab('gxDutchieGet_'), grab('gxCoreRoute_'),
    grab('qbReportViaGXCore_'), grab('qbDepositsViaGXCore_')].join('\n'),
   ctx);
 

@@ -1733,7 +1733,7 @@ function dtodayMaxAge_(raw) {
 }
 
 function dutchieTodayFetch_(store, todayPT, toISO, nocache, maxAgeS) {
-  const liveCacheKey = 'dtoday_v2_' + store + '_' + todayPT;
+  const liveCacheKey = dtodayKey_(store, todayPT);
   const flightKey    = liveCacheKey + '__inflight';
   const maxAgeMs     = (maxAgeS == null ? DTODAY_FRESH_S_ : maxAgeS) * 1000;
   let seenAsOf = 0;
@@ -1807,7 +1807,13 @@ function dtodayQuery_(todayPT, toISO) {
   return {
     fromLastModifiedDateUTC: todayPT + 'T07:00:00Z',
     toLastModifiedDateUTC:   toISO,
-    includeItems:            'true',
+    /* IncludeDetail, NOT includeItems. Dutchie ignores a parameter it does not know, so for as long
+     * as this said includeItems every row came back with `items: []` — no error, no warning. Today's
+     * COGS summed to $0, which put Gross Profit at "—" on the Today view and left today's cost out of
+     * every month's Gross Profit, and topProducts was always empty. Measured 2026-09-17 on Commercial:
+     * same 124 rows and $3,415.03 net either way; COGS $0 → $1,503.04. The body roughly doubles
+     * (175KB → 369KB) with no measurable change in time. Every other GX app already sends this name. */
+    IncludeDetail:           'true',
   };
 }
 
@@ -1841,7 +1847,9 @@ const BG_REFRESH_LAST_KEY_  = 'BG_REFRESH_LAST';
 // Trigger entry point. No trailing underscore: Apps Script cannot run a private function from a trigger.
 function bgRefreshTodayTick() { return bgRefreshToday_(false); }
 
-function dtodayKey_(store, todayPT) { return 'dtoday_v2_' + store + '_' + todayPT; }
+// v3: entries written before IncludeDetail carry $0 COGS; the bump retires them at deploy instead of
+// letting them be served for up to 20 minutes. One definition — the viewer and the trigger both use it.
+function dtodayKey_(store, todayPT) { return 'dtoday_v3_' + store + '_' + todayPT; }
 
 function dtodayAgeS_(key) {
   try {
@@ -2012,7 +2020,11 @@ function dtodayFromRows_(rows, todayPT) {
     const items = tx.items || tx.lineItems || tx.orderItems || [];
     for (const item of items) {
       const qty  = Number(item.quantity != null ? item.quantity : (item.qty != null ? item.qty : 1)) || 1;
-      const name = item.productName || item.name || 'Unknown';
+      // Dutchie's line items carry productId/sku but NO name. Bucketing them as 'Unknown' would put a
+      // one-row "Top products" card on screen holding all of today's revenue; skipping keeps the card
+      // hidden, which is how it has always looked. Naming them needs a product lookup — not done here.
+      const name = item.productName || item.name;
+      if (!name) continue;
       const rev  = Number(item.totalPrice || item.price || item.lineTotal || 0);
       if (!productMap[name]) productMap[name] = { revenue: 0, units: 0 };
       productMap[name].revenue += rev;

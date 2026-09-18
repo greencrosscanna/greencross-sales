@@ -79,13 +79,13 @@ vm.createContext(ctx);
 const constLine = n => { const m = new RegExp('\\nconst ' + n + '\\s*=\\s*[^;]+;').exec(SRC); if (!m) throw new Error('no const ' + n); return m[0]; };
 vm.runInContext([constLine('DTODAY_WAIT_MS_'), constLine('DTODAY_FLIGHT_TTL_'),
   constLine('DTODAY_FRESH_S_'), constLine('DTODAY_SNAPSHOT_S_'), constLine('DTODAY_KEEP_S_'),
-  grab('cacheGet_'), grab('cacheSet_'), grab('dtodayMaxAge_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_')].join('\n'), ctx);
+  grab('cacheGet_'), grab('cacheSet_'), grab('dtodayKey_'), grab('dtodayMaxAge_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_')].join('\n'), ctx);
 
 // maxage goes through the shipped clamp, exactly as getStoreSales_ hands it over.
 const call = (s, day, toISO, nocache, maxage) =>
   vm.runInContext('dutchieTodayFetch_(' + JSON.stringify([s, day, toISO, nocache == null ? null : nocache]).slice(1, -1)
     + ', dtodayMaxAge_(' + JSON.stringify(maxage == null ? null : maxage) + '))', ctx);
-const KEY = (s, d) => 'dtoday_v2_' + s + '_' + d;
+const KEY = (s, d) => vm.runInContext('dtodayKey_(' + JSON.stringify(s) + ', ' + JSON.stringify(d) + ')', ctx);
 const entry = (obj, asOf) => JSON.stringify(Object.assign({}, obj, { as_of: asOf }));
 
 let pass = 0, fail = 0;

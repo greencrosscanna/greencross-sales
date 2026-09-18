@@ -91,7 +91,7 @@ vm.runInContext([
 ].join('\n'), ctx);
 
 const run = force => vm.runInContext('bgRefreshToday_(' + (force ? 'true' : 'false') + ')', ctx);
-const key = s => 'dtoday_v2_' + s + '_' + TODAY;
+const key = s => vm.runInContext(`dtodayKey_(${JSON.stringify(s)}, '${TODAY}')`, ctx);
 const viewerOpen = s => vm.runInContext(`dutchieTodayFetch_(${JSON.stringify(s)}, '${TODAY}', 'x', null, dtodayMaxAge_('600'))`, ctx);
 
 console.log('\nall due stores in ONE parallel batch — the trigger quota is shared and daily');
@@ -112,7 +112,12 @@ check('...with no live pull of its own', liveCalls, 0);
 console.log('\nit asks Dutchie the SAME question the on-demand pull does');
 const u = fetchAllCalls[0][0].url;
 check('dutchie_get on the transactions path', /action=dutchie_get/.test(u) && /path=%2Freporting%2Ftransactions/.test(u), true);
-check('with items and the lastModified window', /includeItems=true/.test(u) && /fromLastModifiedDateUTC=2026-09-17T07%3A00%3A00Z/.test(u), true);
+check('with the lastModified window', /fromLastModifiedDateUTC=2026-09-17T07%3A00%3A00Z/.test(u), true);
+/* Dutchie's name for "include line items" is IncludeDetail. It silently ignores anything else, and
+ * for as long as this sent `includeItems` every row came back with items:[] — today's COGS summed to
+ * $0 and Gross Profit read "—" on the Today view (measured 2026-09-17). */
+check('asks for line items by Dutchie\'s real name, IncludeDetail', /IncludeDetail=true/.test(u), true);
+check('...and not by the name Dutchie ignores', /includeItems/i.test(u), false);
 check('errors are not raised as HTTP exceptions (muteHttpExceptions)', fetchAllCalls[0][0].muteHttpExceptions, true);
 
 console.log('\na fresh entry is left alone; a stale or missing one is pulled');
@@ -182,6 +187,27 @@ check('no marker survives', STORES.some(s => cache.has(key(s) + '__inflight')), 
 
 console.log('\nthe last run is recorded for ?action=bgrefresh&op=status');
 check('summary persisted', JSON.parse(props.BG_REFRESH_LAST).stores.Bend.error !== undefined, true);
+
+console.log('\nthe real parser on Dutchie-shaped rows: cost flows, nameless items do not become "Unknown"');
+{
+  const c2 = { GXCore: { salesFromTxns: txns => ({
+    net: txns.reduce((s, t) => s + t.totalBeforeTax, 0), gross: 0, discount: 0, tax: 0, orders: txns.length,
+    cogs: txns.reduce((s, t) => s + t.items.reduce((a, it) => a + it.unitCost * it.quantity, 0), 0) }) } };
+  vm.createContext(c2);
+  vm.runInContext(grab('dtodayFromRows_'), c2);
+  // Exactly the item keys Dutchie returned 2026-09-17 with IncludeDetail=true: no productName.
+  const tx = (id, cost) => ({ transactionId: id, transactionType: 'Retail', isVoid: false, totalBeforeTax: 20,
+    transactionDateLocalTime: '2026-09-17T12:00:00',
+    items: [{ productId: 7, sku: 'A1', quantity: 2, unitCost: cost, unitPrice: 10, totalPrice: 20 }] });
+  c2.rows = [tx(1, 3), tx(2, 4)];
+  const out = vm.runInContext("dtodayFromRows_(rows, '2026-09-17')", c2);
+  check('line-item cost reaches the day\'s COGS', out.cost, 14);
+  check('...and the per-day row', out.daily[0].cogs, 14);
+  check('nameless items produce no "Unknown" top-product row', out.topProducts.length, 0);
+  c2.rows[0].items[0].productName = 'Blue Dream 3.5g';
+  const named = vm.runInContext("dtodayFromRows_(rows, '2026-09-17')", c2);
+  check('a named item still ranks', named.topProducts.map(p => p.name), ['Blue Dream 3.5g']);
+}
 
 console.log('\nthe trigger is wired');
 check('the handler name is a real public function',

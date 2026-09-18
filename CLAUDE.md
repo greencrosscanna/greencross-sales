@@ -671,6 +671,18 @@ right status indicator."*
   `quiet_recovery_test.js` §6b. Mutation-verified: the stale-answer guard, the marker cleanup, the
   maxage condition.
 
+### Today's COGS was $0 since at least August — Dutchie's parameter is `IncludeDetail` (v2.610)
+
+The live pull asked for `includeItems=true`, a name Dutchie silently ignores, so every intraday row
+came back with `items: []`. Net, gross, tax and orders are transaction-level and were always right;
+**COGS is summed from line items and read $0**, so the Today view's Gross Profit showed "—" and every
+month's Gross Profit left out today's cost. Measured 2026-09-17 on Commercial: 124 rows, $3,415.03
+net either way, COGS $0 → $1,503.04; body 175KB → 369KB, no time change. `dtodayQuery_` is the one
+place the question is asked; the cache key went v2 → v3 so $0 entries were retired at deploy.
+**Line items carry no product name**, so unnamed items are skipped in `topProducts` rather than
+bucketed as "Unknown" — that card stays hidden, as it always has been. `getTxFields` / `getTxDetail`
+(debug probes) still say `includeItems`; left alone. `bg_refresh_test.js` pins the name.
+
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
 
 Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:

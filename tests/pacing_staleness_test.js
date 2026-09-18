@@ -137,7 +137,7 @@ const TTL = /const PACE_FRACS_TTL_MS = ([^;]+);/.exec(SRC);
 check('the TTL is longer than the poll, so it is not what schedules a refresh',
       !!(TTL && eval(TTL[1]) > eval(POLL[1])), true);
 check('refreshLiveData forces a pace re-fetch, bypassing the TTL',
-      /refreshLiveData\(\)\s*\{[\s\S]*?loadPaceFracs\(true\)/.test(SRC), true);
+      /function refreshLiveData\([^)]*\)\s*\{[\s\S]*?loadPaceFracs\(true\)/.test(SRC), true);
 check('the 60-second tick goes through refreshLiveData',
       /_autoRefreshTimer = setInterval\([\s\S]*?refreshLiveData\(\)[\s\S]*?AUTO_REFRESH_MS\)/.test(SRC), true);
 check('returning to a hidden tab also forces a catch-up',

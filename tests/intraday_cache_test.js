@@ -53,8 +53,12 @@ const CACHE = {
 
 // Wall time for the in-flight wait, separate from the TTL clock. Utilities.sleep advances it and runs
 // whatever the "other execution" was scheduled to do at that moment.
+// Entries carry an as_of stamped from Date.now() and are judged by it, so the cache clock (seconds)
+// has to move Date.now() too — otherwise an age check could never see time pass.
 let wallMs = 0, sleeps = 0, onSleep = null;
-const FakeDate = class extends Date { static now() { return 1789000000000 + wallMs; } };
+const BASE_MS = 1789000000000;
+const nowMs = () => BASE_MS + wallMs + clock * 1000;
+const FakeDate = class extends Date { static now() { return nowMs(); } };
 
 let liveCalls = [];
 const ctx = {
@@ -74,10 +78,15 @@ const ctx = {
 vm.createContext(ctx);
 const constLine = n => { const m = new RegExp('\\nconst ' + n + '\\s*=\\s*[^;]+;').exec(SRC); if (!m) throw new Error('no const ' + n); return m[0]; };
 vm.runInContext([constLine('DTODAY_WAIT_MS_'), constLine('DTODAY_FLIGHT_TTL_'),
-  grab('cacheGet_'), grab('cacheSet_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_')].join('\n'), ctx);
+  constLine('DTODAY_FRESH_S_'), constLine('DTODAY_SNAPSHOT_S_'), constLine('DTODAY_KEEP_S_'),
+  grab('cacheGet_'), grab('cacheSet_'), grab('dtodayMaxAge_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_')].join('\n'), ctx);
 
-const call = (s, day, toISO, nocache) =>
-  vm.runInContext('dutchieTodayFetch_(' + JSON.stringify([s, day, toISO, nocache]).slice(1, -1) + ')', ctx);
+// maxage goes through the shipped clamp, exactly as getStoreSales_ hands it over.
+const call = (s, day, toISO, nocache, maxage) =>
+  vm.runInContext('dutchieTodayFetch_(' + JSON.stringify([s, day, toISO, nocache == null ? null : nocache]).slice(1, -1)
+    + ', dtodayMaxAge_(' + JSON.stringify(maxage == null ? null : maxage) + '))', ctx);
+const KEY = (s, d) => 'dtoday_v2_' + s + '_' + d;
+const entry = (obj, asOf) => JSON.stringify(Object.assign({}, obj, { as_of: asOf }));
 
 let pass = 0, fail = 0;
 function check(desc, got, want) {
@@ -108,17 +117,46 @@ call('River Rd', '2026-09-03', '2026-09-03T18:00:00Z');
 call('River Rd', '2026-09-04', '2026-09-04T02:00:00Z');
 check('a new DAY is its own pull — yesterday cannot be served as today', liveCalls.length, 2);
 
-console.log('\nthe TTL is real: 90 seconds, and it expires');
+console.log('\nthe default freshness is real: 90 seconds, and it expires');
 reset();
 call('River Rd', '2026-09-03', '2026-09-03T18:00:00Z');
 clock += 89; call('River Rd', '2026-09-03', '2026-09-03T18:01:29Z');
 check('at 89s it is still served', liveCalls.length, 1);
 clock += 2;  call('River Rd', '2026-09-03', '2026-09-03T18:01:31Z');
 check('past 90s it re-pulls — "Live" must not become a lie', liveCalls.length, 2);
-// The client polls every 60s (AUTO_REFRESH_MS). A TTL at or under that leaves nearly every poll
-// paying full price, which is the silent way this change accomplishes nothing.
-const ttl = /cacheSet_\(liveCacheKey, JSON\.stringify\(out\), (\d+)\)/.exec(SRC);
-check('the TTL outlives the 60s poll interval', ttl && Number(ttl[1]) > 60, true);
+// The desktop polls every 60s (AUTO_REFRESH_MS). A window at or under that leaves nearly every
+// poll paying full price, which is the silent way this change accomplishes nothing.
+check('the default window outlives the 60s poll interval', vm.runInContext('DTODAY_FRESH_S_', ctx) > 60, true);
+
+/* ── OPENING THE APP READS THE BACKGROUND SNAPSHOT ────────────────────────────────────────────────
+ * Sky, 2026-09-17: "when i open the sales app it shows me the latest details, which might be a few
+ * minutes old". The background refresh keeps an entry warm; an open asks with maxage=600 and must be
+ * served it, while a poll/Refresh asking the default must NOT be handed that same old figure. */
+console.log('\nmaxage: an open takes a minutes-old snapshot, a Refresh does not');
+reset();
+store.set(KEY('Bend', '2026-09-03'), { v: entry({ netSales: 555 }, nowMs()), until: 1e9 });
+clock += 300;   // five minutes later
+check('an open (maxage=600) is served the 5-minute-old snapshot', call('Bend', '2026-09-03', 'x', null, 600).netSales, 555);
+check('...without a live pull', liveCalls.length, 0);
+check('a Refresh (default) re-pulls instead of taking it', call('Bend', '2026-09-03', 'x').netSales, 100);
+check('...and the fresh pull is what the next open sees', call('Bend', '2026-09-03', 'x', null, 600).netSales, 100);
+reset();
+store.set(KEY('Bend', '2026-09-03'), { v: entry({ netSales: 555 }, nowMs()), until: 1e9 });
+clock += 601;
+check('past 600s even an open re-pulls', call('Bend', '2026-09-03', 'x', null, 600).netSales, 100);
+reset();
+store.set(KEY('Bend', '2026-09-03'), { v: entry({ netSales: 555 }, nowMs()), until: 1e9 });
+clock += 900;
+check('a caller cannot widen the window past 600 (maxage=99999 is clamped)', call('Bend', '2026-09-03', 'x', null, 99999).netSales, 100);
+check('garbage maxage means the default', vm.runInContext("dtodayMaxAge_('abc')", ctx), 90);
+check('negative maxage means the default', vm.runInContext("dtodayMaxAge_('-5')", ctx), 90);
+check('maxage=0 is honored — always pull', vm.runInContext("dtodayMaxAge_('0')", ctx), 0);
+check('every pull is stamped with as_of', JSON.parse(store.get(KEY('Bend', '2026-09-03')).v).as_of > 0, true);
+check('an entry is KEPT past the widest window, or the snapshot has nothing to serve',
+  vm.runInContext('DTODAY_KEEP_S_ > DTODAY_SNAPSHOT_S_', ctx), true);
+reset();
+store.set(KEY('Bend', '2026-09-03'), { v: JSON.stringify({ netSales: 555 }), until: 1e9 });  // no as_of
+check('an entry with no as_of has an unknown age and is not served', call('Bend', '2026-09-03', 'x', null, 600).netSales, 100);
 
 console.log('\nnocache bypasses — the escape hatch that makes the cache safe to add');
 reset();
@@ -131,7 +169,7 @@ check('...and does not turn into a permanent bypass', liveCalls.length, 2);
 console.log('\na broken cache entry costs a fetch, never the store\'s row');
 reset();
 call('River Rd', '2026-09-03', '2026-09-03T18:00:00Z');
-store.set('dtoday_v1_River Rd_2026-09-03', { v: '{"netSales":', until: 1e9 }); // truncated body
+store.set(KEY('River Rd', '2026-09-03'), { v: '{"netSales":', until: 1e9 }); // truncated body
 let survived = true, got = null;
 try { got = call('River Rd', '2026-09-03', '2026-09-03T18:00:04Z'); } catch (e) { survived = false; }
 check('unparseable JSON does not throw out of the fetch', survived, true);
@@ -141,18 +179,33 @@ check('and returns real numbers', got && got.netSales, 200);
 /* ── A SECOND ASKER JOINS THE PULL ALREADY RUNNING ─────────────────────────────────────────────────
  * Sky, 2026-09-13: "it took 60+ seconds to load on mobile." The browser abandons a live half at 15s;
  * Apps Script does not, so the retry used to start a second identical 20s pull and lose it too. */
-const FLIGHT = 'dtoday_v1_River Rd_2026-09-03__inflight';
-const ENTRY  = 'dtoday_v1_River Rd_2026-09-03';
+const FLIGHT = KEY('River Rd', '2026-09-03') + '__inflight';
+const ENTRY  = KEY('River Rd', '2026-09-03');
 
 console.log('\na request arriving mid-pull is served that pull\'s answer');
 reset();
-store.set(FLIGHT, { v: '1', until: 1e9 });                         // another execution is pulling
+let pullStart = nowMs();
+store.set(FLIGHT, { v: String(pullStart), until: 1e9 });           // another execution is pulling
 onSleep = t => { if (t >= 6000 && !store.has(ENTRY)) {             // …and lands 6s later
-  store.set(ENTRY, { v: JSON.stringify({ netSales: 777 }), until: 1e9 }); store.delete(FLIGHT); } };
+  store.set(ENTRY, { v: entry({ netSales: 777 }, pullStart), until: 1e9 }); store.delete(FLIGHT); } };
 got = call('River Rd', '2026-09-03', '2026-09-03T18:00:10Z');
 check('no second pull', liveCalls.length, 0);
 check('it returns the in-flight pull\'s figure', got && got.netSales, 777);
 check('and it waited for it rather than giving up at once', wallMs >= 6000, true);
+
+/* Entries are kept 20 minutes now, so during a pull the cache usually still holds the OLDER figure
+ * the caller just turned down. "Any hit" would hand that straight back as if it were the new one. */
+console.log('\nmid-pull, the OLD entry still sitting in the cache is not the answer');
+reset();
+store.set(ENTRY, { v: entry({ netSales: 111 }, nowMs()), until: 1e9 });   // old figure
+clock += 200;                                                              // too old for a Refresh
+pullStart = nowMs();
+store.set(FLIGHT, { v: String(pullStart), until: 1e9 });
+onSleep = t => { if (t >= 4000 && store.has(FLIGHT)) {
+  store.set(ENTRY, { v: entry({ netSales: 999 }, pullStart), until: 1e9 }); store.delete(FLIGHT); } };
+got = call('River Rd', '2026-09-03', 'x');
+check('it waited for the new figure instead of returning the old one at once', got && got.netSales, 999);
+check('...and still made no pull of its own', liveCalls.length, 0);
 
 console.log('\nthe other pull FAILED: the waiter pulls at once, not after the whole wait');
 reset();
@@ -191,7 +244,11 @@ check('and still clears the marker, so nobody waits on a dead pull', store.has(F
 
 console.log('\nthe wrapper is wired into the sales path, not merely defined');
 check('getStoreSales_ passes its nocache through to the live fetch',
-  /dutchieTodayFetch_\(store, todayPT, to, nocache\)/.test(SRC), true);
+  /dutchieTodayFetch_\(store, todayPT, to, nocache\b/.test(SRC), true);
+check('...and its maxage, through the clamp',
+  /dutchieTodayFetch_\(store, todayPT, to, nocache, dtodayMaxAge_\(maxage\)\)/.test(SRC), true);
+check('the route hands params.maxage to getStoreSales_',
+  /getStoreSales_\(store, from, to, params\.nocache, params\.phase, params\.maxage\)/.test(SRC), true);
 // nocache has to be the FOURTH argument, which is what this pins. Arity is deliberately left
 // open: `phase` was added after this test and pinning the exact call shape made an unrelated
 // change fail here, which teaches the next person to loosen the assertion rather than read it.

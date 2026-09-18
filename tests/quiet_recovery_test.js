@@ -48,7 +48,7 @@ const CAP = Number(capM[1]);
 /* Build a context holding the real tick plus the minimum around it. Everything the gate decides on
    is a knob here (quiet, incomplete, hidden, in-flight); everything it calls is counted. */
 function mk(opts) {
-  const o = Object.assign({ quiet: true, incomplete: true, hidden: false, inFlight: false, day: null }, opts);
+  const o = Object.assign({ quiet: true, incomplete: true, hidden: false, inFlight: false, day: null, phone: false }, opts);
   const now = new Date();
   const ctx = {
     console,
@@ -65,6 +65,7 @@ function mk(opts) {
     clearAutoRefresh() {},
     toDateStr: d => d.toISOString().slice(0, 10),
     inQuietHours: () => o.quiet,
+    manualRefreshMode_: () => o.phone,
     quietRecoveryNeeded_: () => o.incomplete,
     fetches: 0,
     paused: 0,
@@ -148,6 +149,30 @@ console.log('\n6. the gates ABOVE the quiet check still win');
   const h = mk({ quiet: true, incomplete: true, day: '2001-01-01' });
   h.tick();
   ok('a historical day stays static', h.fetches === 0 && h.paused === 0);
+}
+
+/* Sky, 2026-09-17: "remove the polling on mobile and replace it with the option to refresh". The
+ * tick stays on a phone for recovery only — the same carve-out, the same predicate, the same cap. */
+console.log('\n6b. phones do not poll — they only recover an incomplete load');
+{
+  const p = mk({ phone: true, quiet: false, incomplete: false });
+  for (let i = 0; i < 5; i++) p.tick();
+  ok('a complete phone dashboard never fetches in the daytime', p.fetches === 0);
+  ok('...and does not paint the overnight pill in the daytime', p.paused === 0);
+
+  const q = mk({ phone: true, quiet: false, incomplete: true });
+  for (let i = 0; i < CAP + 5; i++) q.tick();
+  ok('an incomplete phone load is retried, capped at QUIET_RECOVERY_MAX_', q.fetches === CAP);
+  q.opts.incomplete = false; q.tick();
+  ok('...and the allowance comes back once it is whole', q._quietRecoveryTries === 0 && q.fetches === CAP);
+
+  const d = mk({ phone: false, quiet: false, incomplete: false });
+  d.tick();
+  ok('the desktop still polls a complete dashboard', d.fetches === 1);
+
+  const n = mk({ phone: true, quiet: true, incomplete: false });
+  n.tick();
+  ok('overnight a phone falls through to the ordinary pause', n.fetches === 0 && n.paused === 1);
 }
 
 console.log('\n7. "incomplete" is storeNotCurrent_ — ONE definition, not a second one');

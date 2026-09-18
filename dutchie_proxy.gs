@@ -81,7 +81,7 @@ function gxRetryHold_(started, backoffMs) {
 
 /* One Dutchie read through GX Core. `params` are forwarded verbatim, so each caller keeps its own
    query semantics. Returns the rows array, or the raw object for endpoints that answer with one. */
-function gxDutchieGet_(store, path, params) {
+function gxDutchieQs_(store, path, params) {
   let qs = '?action=dutchie_get'
          + '&store=' + encodeURIComponent(store)
          + '&path=' + encodeURIComponent(path)
@@ -89,6 +89,11 @@ function gxDutchieGet_(store, path, params) {
   Object.keys(params || {}).forEach(k => {
     qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
   });
+  return qs;
+}
+
+function gxDutchieGet_(store, path, params) {
+  const qs = gxDutchieQs_(store, path, params);
 
   let lastErr = '', stopped = '', tries = 0;
   const started = Date.now();
@@ -963,6 +968,25 @@ function doGet(e) {
     return jsonOut_({ ok: true, app: 'sales', was: was, now: want });
   }
 
+  // Background refresh of today's figure — see bgRefreshToday_. Secret-gated so it can be installed,
+  // checked and switched off from a terminal. `run` executes one pass now; `force=1` ignores store
+  // hours and entry age, for verifying outside the window.
+  if (params.action === 'bgrefresh') {
+    const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
+    if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
+    const OPS = ['status', 'install', 'remove', 'run'];
+    const op  = String(params.op || 'status');
+    if (OPS.indexOf(op) === -1) return jsonOut_({ ok: false, error: 'op must be one of ' + OPS.join(', '), got: op });
+    try {
+      if (op === 'install') return jsonOut_(bgRefreshInstall_());
+      if (op === 'remove')  return jsonOut_(bgRefreshRemove_());
+      if (op === 'run')     return jsonOut_({ ok: true, run: bgRefreshToday_(params.force === '1') });
+      return jsonOut_(bgRefreshStatus_());
+    } catch (e) {
+      return jsonOut_({ ok: false, error: errText_(e) });
+    }
+  }
+
   // Heartbeat: renew a still-valid token to extend the session
   // ── pnlprobe — exercise the P&L path in the LIVE Apps Script runtime, without a session ──────
   // The `pnl` action sits behind the session gate, so the only way to run it is to be signed in with
@@ -1407,7 +1431,7 @@ function doGet(e) {
   }
   if (!gate.ok) return jsonOut_({ error: 'Unknown store: ' + store });
 
-  return getStoreSales_(store, from, to, params.nocache, params.phase);
+  return getStoreSales_(store, from, to, params.nocache, params.phase, params.maxage);
 }
 
 function doPost(e) {
@@ -1426,7 +1450,7 @@ function doPost(e) {
 // Settled days (yesterday and earlier) come from GXCore.getSalesDaily — fast,
 // no Dutchie quota.  Today (intraday) still uses a live Dutchie transaction pull.
 
-function getStoreSales_(store, from, to, nocache, phase) {
+function getStoreSales_(store, from, to, nocache, phase, maxage) {
   try {
     /* PHASE SPLITS THE FAST HALF OFF FROM THE FRAGILE ONE.
      *
@@ -1483,7 +1507,7 @@ function getStoreSales_(store, from, to, nocache, phase) {
 
     // Live: today only (if the requested range includes today)
     const _t2 = Date.now();
-    const liveResult = (wantLive && toDate >= todayPT) ? dutchieTodayFetch_(store, todayPT, to, nocache) : null;
+    const liveResult = (wantLive && toDate >= todayPT) ? dutchieTodayFetch_(store, todayPT, to, nocache, dtodayMaxAge_(maxage)) : null;
     if (liveResult) probeMark_('live_today', Date.now() - _t2, { orders: liveResult.orders });
 
     let net = 0, gros = 0, disc = 0, cogs = 0, tx = 0, ord = 0;
@@ -1547,6 +1571,9 @@ function getStoreSales_(store, from, to, nocache, phase) {
         .map(([date, d]) => ({ date, netSales: d.netSales, grossSales: d.grossSales, orders: d.orders, discounts: d.discounts, cogs: d.cogs || 0, tax: d.tax || 0 })),
       cacheRows:  cacheRows.length,
       liveOrders: liveResult ? liveResult.orders : 0,
+      // When today's figure was pulled from Dutchie (ms). A snapshot can be minutes old by design;
+      // the client says so on screen instead of stamping it with the time it happened to render.
+      liveAsOf:   liveResult && liveResult.as_of ? liveResult.as_of : null,
       /* What this answer actually covers. The client merges a settled half and a live half into one
        * store, and a half that does not say which one it is cannot be merged safely — summing two
        * settled halves would double the month. Always present, including on the unsplit default. */
@@ -1681,21 +1708,57 @@ function loadProbe_(params) {
 const DTODAY_WAIT_MS_   = 25000;
 const DTODAY_FLIGHT_TTL_ = 60;
 
-function dutchieTodayFetch_(store, todayPT, toISO, nocache) {
-  const liveCacheKey = 'dtoday_v1_' + store + '_' + todayPT;
+/* HOW OLD A FIGURE A CALLER WILL ACCEPT — AND THE ONE CACHE ENTRY BOTH ANSWERS COME OUT OF.
+ *
+ * Sky, 2026-09-17: "when i open the sales app it shows me the latest details, which might be a few
+ * minutes old... it's less about being penny accurate at the exact time i look." Opening the app
+ * used to pay for a live Dutchie pull whenever the 90s entry had lapsed — which, with nobody
+ * watching, was always — and that pull is the /exec hop measured at 3-50s.
+ *
+ * So every entry carries `as_of` (when its pull STARTED — conservative: the data is at least that
+ * fresh) and is KEPT for 20 minutes, while each caller says how old an answer it will take:
+ *   - default 90s  — a poll or a Refresh, exactly the contract this function always had;
+ *   - up to 600s   — opening the app (`maxage`), served by the background refresh below.
+ * One entry, two thresholds, rather than a second "snapshot" cache that could disagree with it.
+ *
+ * Clamped at 600 so no caller can ask for an hour-old figure and have it painted as today's. */
+const DTODAY_FRESH_S_    = 90;
+const DTODAY_SNAPSHOT_S_ = 600;
+const DTODAY_KEEP_S_     = 1200;
+
+function dtodayMaxAge_(raw) {
+  const n = Number(raw);
+  if (raw == null || raw === '' || !isFinite(n) || n < 0) return DTODAY_FRESH_S_;
+  return Math.min(Math.floor(n), DTODAY_SNAPSHOT_S_);
+}
+
+function dutchieTodayFetch_(store, todayPT, toISO, nocache, maxAgeS) {
+  const liveCacheKey = 'dtoday_v2_' + store + '_' + todayPT;
   const flightKey    = liveCacheKey + '__inflight';
+  const maxAgeMs     = (maxAgeS == null ? DTODAY_FRESH_S_ : maxAgeS) * 1000;
+  let seenAsOf = 0;
   if (!nocache) {
     const hit = cacheGet_(liveCacheKey);
     // Parse failures fall through to a live pull rather than throwing: a corrupt or half-written
-    // cache entry must cost a fetch, never the store's whole row.
-    if (hit) { try { return JSON.parse(hit); } catch (e) {} }
-    const waited = dtodayAwaitFlight_(liveCacheKey, flightKey);
+    // cache entry must cost a fetch, never the store's whole row. An entry with no as_of is treated
+    // the same way — its age is unknown, so it is not current.
+    if (hit) {
+      try {
+        const ent  = JSON.parse(hit);
+        const asOf = Number(ent && ent.as_of) || 0;
+        if (asOf && Date.now() - asOf <= maxAgeMs) return ent;
+        seenAsOf = asOf;
+      } catch (e) {}
+    }
+    const waited = dtodayAwaitFlight_(liveCacheKey, flightKey, seenAsOf);
     if (waited) return waited;
   }
-  try { CACHE.put(flightKey, String(Date.now()), DTODAY_FLIGHT_TTL_); } catch (e) {}
+  const t0 = Date.now();
+  try { CACHE.put(flightKey, String(t0), DTODAY_FLIGHT_TTL_); } catch (e) {}
   try {
     const out = dutchieTodayFetchLive_(store, todayPT, toISO);
-    try { cacheSet_(liveCacheKey, JSON.stringify(out), 90); } catch (e) {}
+    out.as_of = t0;
+    try { cacheSet_(liveCacheKey, JSON.stringify(out), DTODAY_KEEP_S_); } catch (e) {}
     return out;
   } finally {
     try { CACHE.remove(flightKey); } catch (e) {}
@@ -1703,20 +1766,28 @@ function dutchieTodayFetch_(store, todayPT, toISO, nocache) {
 }
 
 /* Returns the in-flight pull's answer, or null to go and pull. Every failure here is a null — the
-   wait is an optimization, and it must never be the reason a store gets no figure. */
-function dtodayAwaitFlight_(liveCacheKey, flightKey) {
+   wait is an optimization, and it must never be the reason a store gets no figure.
+
+   ONLY AN ANSWER NEWER THAN THE ONE ALREADY REJECTED COUNTS. Entries are kept for 20 minutes now, so
+   while a pull is running the cache usually still holds the older figure the caller just turned
+   down; accepting "any hit" would hand that straight back. The marker holds the pull's start time,
+   which is the as_of its answer will carry. */
+function dtodayAwaitFlight_(liveCacheKey, flightKey, seenAsOf) {
   try {
-    if (!CACHE.get(flightKey)) return null;
+    const mark = CACHE.get(flightKey);
+    if (!mark) return null;
+    const minAsOf = Math.max(Number(mark) || 0, (Number(seenAsOf) || 0) + 1);
     const started = Date.now();
     while (Date.now() - started < DTODAY_WAIT_MS_) {
       Utilities.sleep(400);
       const hit = cacheGet_(liveCacheKey);
       if (hit) {
-        try {
-          const out = JSON.parse(hit);
+        let out = null;
+        try { out = JSON.parse(hit); } catch (e) { return null; }
+        if ((Number(out && out.as_of) || 0) >= minAsOf) {
           probeMark_('live_joined_inflight', Date.now() - started, { served: true });
           return out;
-        } catch (e) { return null; }
+        }
       }
       if (!CACHE.get(flightKey)) break;   // the other pull ended without an answer — do our own now
     }
@@ -1725,18 +1796,176 @@ function dtodayAwaitFlight_(liveCacheKey, flightKey) {
   return null;
 }
 
-function dutchieTodayFetchLive_(store, todayPT, toISO) {
-  // Wide lastModified window (approx Pacific midnight); filter by transaction date below.
-  // WINDOWED BY LAST MODIFIED, NOT BY DATE — an edit to an older sale has to be picked up. This is
-  // why the call goes through dutchie_get rather than GX Core's named transactions route, which
-  // windows by transaction date: that swap would have quietly changed which sales this app sees.
-  const fromUTC = todayPT + 'T07:00:00Z';
-  const rows = gxDutchieGet_(store, '/reporting/transactions', {
-    fromLastModifiedDateUTC: fromUTC,
+// Wide lastModified window (approx Pacific midnight); filter by transaction date after.
+// WINDOWED BY LAST MODIFIED, NOT BY DATE — an edit to an older sale has to be picked up. This is
+// why the call goes through dutchie_get rather than GX Core's named transactions route, which
+// windows by transaction date: that swap would have quietly changed which sales this app sees.
+// One definition, shared by the on-demand pull and the background refresh, so the two cannot ask
+// Dutchie different questions and cache different answers under one key.
+const DTODAY_PATH_ = '/reporting/transactions';
+function dtodayQuery_(todayPT, toISO) {
+  return {
+    fromLastModifiedDateUTC: todayPT + 'T07:00:00Z',
     toLastModifiedDateUTC:   toISO,
     includeItems:            'true',
+  };
+}
+
+/* ── BACKGROUND REFRESH — today's figure is pulled on a clock, not by whoever opens the app ────────
+ *
+ * Sky, 2026-09-17: "could we program the Sales app to pull the sales numbers when there's no load,
+ * store that into cache, then when i open the sales app it shows me the latest details, which might
+ * be a few minutes old?"
+ *
+ * A time trigger (every BG_REFRESH_EVERY_MIN_) re-pulls any store whose entry is older than
+ * BG_REFRESH_STALE_S_ and writes it to the SAME entry dutchieTodayFetch_ serves. Opening the app asks
+ * with maxage=600, so it reads that entry instead of waiting on the Dutchie hop itself.
+ *
+ * - ALL DUE STORES IN ONE UrlFetchApp.fetchAll, not six in a row. Trigger runtime is a DAILY quota
+ *   shared by every GX script on this account; six sequential 3-20s pulls every 5 minutes for 14
+ *   hours is up to ~5 hours of it. In parallel a run costs about its slowest store.
+ * - ONE ATTEMPT, NO RETRY LOOP. The next run is five minutes away and the viewer path still pulls on
+ *   its own when an entry is too old, so a retry here only spends quota.
+ * - Only during store hours (PT), the same window the client's overnight pause uses.
+ * - A store a viewer is already pulling is skipped — its answer lands in the same entry.
+ * - Marks each pull in flight, so a viewer arriving mid-run joins it instead of starting a second.
+ *
+ * Installed and inspected with ?action=bgrefresh&op=install|status|remove|run (secret-gated). */
+const BG_REFRESH_HANDLER_   = 'bgRefreshTodayTick';
+const BG_REFRESH_EVERY_MIN_ = 5;
+const BG_REFRESH_STALE_S_   = 240;
+const BG_OPEN_HOUR_         = 8;
+const BG_QUIET_HOUR_        = 22.25;
+const BG_REFRESH_LAST_KEY_  = 'BG_REFRESH_LAST';
+
+// Trigger entry point. No trailing underscore: Apps Script cannot run a private function from a trigger.
+function bgRefreshTodayTick() { return bgRefreshToday_(false); }
+
+function dtodayKey_(store, todayPT) { return 'dtoday_v2_' + store + '_' + todayPT; }
+
+function dtodayAgeS_(key) {
+  try {
+    const hit = cacheGet_(key);
+    if (!hit) return null;
+    const a = Number(JSON.parse(hit).as_of) || 0;
+    return a ? Math.round((Date.now() - a) / 1000) : null;
+  } catch (e) { return null; }
+}
+
+function bgInStoreHours_(now) {
+  const h = Number(Utilities.formatDate(now, 'America/Los_Angeles', 'H'))
+          + Number(Utilities.formatDate(now, 'America/Los_Angeles', 'm')) / 60;
+  return h >= BG_OPEN_HOUR_ && h < BG_QUIET_HOUR_;
+}
+
+function bgRefreshToday_(force) {
+  const now = new Date();
+  const t0  = Date.now();
+  const summary = { at: now.toISOString(), ms: 0, pulled: 0, stores: {} };
+  if (!force && !bgInStoreHours_(now)) {
+    summary.skipped = 'outside store hours';
+    bgRecord_(summary);
+    return summary;
+  }
+  const todayPT = Utilities.formatDate(now, 'America/Los_Angeles', 'yyyy-MM-dd');
+  const toISO   = now.toISOString();
+  const due = [];
+  salesStores_().forEach(function (st) {
+    const key = dtodayKey_(st.sales, todayPT);
+    const age = dtodayAgeS_(key);
+    if (!force && age != null && age < BG_REFRESH_STALE_S_) {
+      summary.stores[st.sales] = { pulled: false, age_s: age };
+      return;
+    }
+    let busy = null;
+    try { busy = CACHE.get(key + '__inflight'); } catch (e) {}
+    if (!force && busy) {
+      summary.stores[st.sales] = { pulled: false, age_s: age, note: 'a viewer is pulling it' };
+      return;
+    }
+    due.push({ store: st.sales, key: key });
   });
 
+  if (due.length) {
+    due.forEach(function (d) { try { CACHE.put(d.key + '__inflight', String(t0), DTODAY_FLIGHT_TTL_); } catch (e) {} });
+    let resps = null, batchErr = '';
+    try {
+      resps = UrlFetchApp.fetchAll(due.map(function (d) {
+        return { url: GXCORE_EXEC_ + gxDutchieQs_(d.store, DTODAY_PATH_, dtodayQuery_(todayPT, toISO)),
+                 muteHttpExceptions: true };
+      }));
+    } catch (e) {
+      batchErr = errText_(e) || 'fetch failed';
+    }
+    due.forEach(function (d, i) {
+      const rec = { pulled: false };
+      try {
+        if (!resps) throw new Error(batchErr);
+        let data = null;
+        try { data = JSON.parse(resps[i].getContentText()); } catch (e) {}
+        if (!data || data.ok !== true) {
+          throw new Error((data && data.error) || ('GX Core answered HTTP ' + resps[i].getResponseCode()));
+        }
+        const rows = Array.isArray(data.rows) ? data.rows : (data.data != null ? data.data : []);
+        const out  = dtodayFromRows_(rows, todayPT);
+        out.as_of  = t0;
+        cacheSet_(d.key, JSON.stringify(out), DTODAY_KEEP_S_);
+        rec.pulled = true;
+        rec.net    = out.netSales;
+        summary.pulled++;
+      } catch (e) {
+        rec.error = errText_(e);
+      } finally {
+        try { CACHE.remove(d.key + '__inflight'); } catch (e) {}
+      }
+      summary.stores[d.store] = rec;
+    });
+  }
+  summary.ms = Date.now() - t0;
+  bgRecord_(summary);
+  return summary;
+}
+
+function bgRecord_(summary) {
+  try { PropertiesService.getScriptProperties().setProperty(BG_REFRESH_LAST_KEY_, JSON.stringify(summary)); } catch (e) {}
+}
+
+function bgRefreshTriggers_() {
+  return ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === BG_REFRESH_HANDLER_; });
+}
+
+function bgRefreshStatus_() {
+  let last = null;
+  try { last = JSON.parse(PropertiesService.getScriptProperties().getProperty(BG_REFRESH_LAST_KEY_) || 'null'); } catch (e) {}
+  const todayPT = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
+  const ages = {};
+  salesStores_().forEach(function (st) { ages[st.sales] = dtodayAgeS_(dtodayKey_(st.sales, todayPT)); });
+  return {
+    ok: true, installed: bgRefreshTriggers_().length,
+    every_min: BG_REFRESH_EVERY_MIN_, stale_s: BG_REFRESH_STALE_S_,
+    snapshot_max_s: DTODAY_SNAPSHOT_S_, keep_s: DTODAY_KEEP_S_,
+    in_store_hours: bgInStoreHours_(new Date()),
+    last_run: last, entry_age_s: ages,
+  };
+}
+
+// Replaces rather than adds, so running install twice never leaves two triggers firing.
+function bgRefreshInstall_() {
+  bgRefreshTriggers_().forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger(BG_REFRESH_HANDLER_).timeBased().everyMinutes(BG_REFRESH_EVERY_MIN_).create();
+  return bgRefreshStatus_();
+}
+
+function bgRefreshRemove_() {
+  bgRefreshTriggers_().forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  return bgRefreshStatus_();
+}
+
+function dutchieTodayFetchLive_(store, todayPT, toISO) {
+  return dtodayFromRows_(gxDutchieGet_(store, DTODAY_PATH_, dtodayQuery_(todayPT, toISO)), todayPT);
+}
+
+function dtodayFromRows_(rows, todayPT) {
   const sales = rows.filter(r => {
     if (r.isVoid) return false;
     if ((r.transactionType || '').toLowerCase() !== 'retail') return false;

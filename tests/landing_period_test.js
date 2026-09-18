@@ -103,7 +103,8 @@ console.log('\n3. the end-of-load block no longer re-selects or re-renders');
 console.log('\n4. the fetch is still a MONTH — the day is a slice of it, not a second load');
 {
   ok('fetchMonthData still keys on year and month only',
-     /async function fetchMonthData\(store, year, month, _retry(, onSettled)?\)/.test(HTML));
+     // `preset` (2026-09-17) hands in halves from the opening snapshot; it adds no key.
+     /async function fetchMonthData\(store, year, month, _retry(, onSettled(, preset)?)?\)/.test(HTML));
   ok('...and liveData is still keyed by year:month, so a day change reloads nothing',
      /const loadKey = activeYear \+ ':' \+ activeMonth;/.test(HTML));
 }

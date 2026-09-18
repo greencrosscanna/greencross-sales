@@ -974,13 +974,16 @@ function doGet(e) {
   if (params.action === 'bgrefresh') {
     const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
     if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
-    const OPS = ['status', 'install', 'remove', 'run'];
+    // `bundle` builds the opening snapshot now (see bundleRefresh_) — the way to warm it right after a
+    // deploy instead of waiting up to five minutes for the trigger.
+    const OPS = ['status', 'install', 'remove', 'run', 'bundle'];
     const op  = String(params.op || 'status');
     if (OPS.indexOf(op) === -1) return jsonOut_({ ok: false, error: 'op must be one of ' + OPS.join(', '), got: op });
     try {
       if (op === 'install') return jsonOut_(bgRefreshInstall_());
       if (op === 'remove')  return jsonOut_(bgRefreshRemove_());
       if (op === 'run')     return jsonOut_({ ok: true, run: bgRefreshToday_(params.force === '1') });
+      if (op === 'bundle')  return jsonOut_(bundleRefresh_(true));
       return jsonOut_(bgRefreshStatus_());
     } catch (e) {
       return jsonOut_({ ok: false, error: errText_(e) });
@@ -1379,6 +1382,8 @@ function doGet(e) {
   const auth = requireAuth_(params);
   if (!auth.ok) return jsonOut_({ ok: false, error: auth.error, code: 401 });
 
+  // The opening snapshot — READ-ONLY, never built inside this request. See getBundle_.
+  if (params.action === 'bundle')      return jsonOut_(getBundle_());
   if (params.action === 'stores')      return getStoresMeta_();
   if (params.action === 'goals')       return getGoals();
   if (params.action === 'period_goals') return getPeriodGoalsForDate_(params.date);
@@ -1845,7 +1850,13 @@ const BG_QUIET_HOUR_        = 22.25;
 const BG_REFRESH_LAST_KEY_  = 'BG_REFRESH_LAST';
 
 // Trigger entry point. No trailing underscore: Apps Script cannot run a private function from a trigger.
-function bgRefreshTodayTick() { return bgRefreshToday_(false); }
+// Today's figure first, THEN the opening snapshot — so the snapshot carries the pull that just landed.
+// Each is its own try: a snapshot that fails to build must never cost the today refresh, or the reverse.
+function bgRefreshTodayTick() {
+  const out = bgRefreshToday_(false);
+  try { bundleRefresh_(false); } catch (e) { Logger.log('bundleRefresh_ failed: ' + errText_(e)); }
+  return out;
+}
 
 // v3: entries written before IncludeDetail carry $0 COGS; the bump retires them at deploy instead of
 // letting them be served for up to 20 minutes. One definition — the viewer and the trigger both use it.
@@ -1954,6 +1965,7 @@ function bgRefreshStatus_() {
     snapshot_max_s: DTODAY_SNAPSHOT_S_, keep_s: DTODAY_KEEP_S_,
     in_store_hours: bgInStoreHours_(new Date()),
     last_run: last, entry_age_s: ages,
+    bundle: bundleStatus_(),
   };
 }
 
@@ -1967,6 +1979,269 @@ function bgRefreshInstall_() {
 function bgRefreshRemove_() {
   bgRefreshTriggers_().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   return bgRefreshStatus_();
+}
+
+/* ── THE OPENING SNAPSHOT — opening the app is ONE read of what a trigger already built ────────────
+ *
+ * Measured 2026-09-17 on the live backend, cold browser cache: a Sales open fired 30-31 /exec calls
+ * (twelve store halves, stores, goals, the goal range, other revenue, pace, the day's period goals,
+ * a year of history per store, Gross Profit, plus GX Core's own), first figures at ~3s, and the last
+ * call landing at 42s on a phone. Every one of those is a separate roll against a hop whose failures
+ * are not independent — an /exec outage window takes EVERYTHING in flight with it (see CLAUDE.md,
+ * "THE STALLS ARE NOT INDEPENDENT"). Inventory and Leaderboard open fast for one reason: a load is a
+ * READ of a snapshot a trigger built, never a BUILD inside the request. This is that, for Sales.
+ *
+ * WHAT IS IN IT is exactly what the landing view (today, current month) waits on, each piece built
+ * by the SAME function its own route calls — never a second copy of the rule:
+ *   sales      per store: the settled month (getStoreSales_ phase=settled) and today's figure (the
+ *              dtoday_v3 entry the refresh above just wrote, shaped as phase=live)
+ *   stores     getStoresMeta_          goals     getGoals
+ *   pg_range   getPeriodGoalsRange_(today, today)   pg_day  getPeriodGoalsForDate_(today)
+ *   pace       getPacingFracs_         otherrev  getOtherRevenue
+ *
+ * EVERY PART CARRIES ITS OWN as_of, AND A PART THAT FAILS KEEPS ITS LAST GOOD COPY — Leaderboard's
+ * per-part try and Inventory's last-good carry-forward. A failed piece is never blanked because a
+ * sibling succeeded, and a carried piece says so (`stale`, `error`) with its ORIGINAL age, never
+ * the time of this build. A piece with nothing to carry is { ok:false } in its slot, which is what
+ * the client's cache gate reads to refuse writing a half-true snapshot to disk.
+ *
+ * NOTHING HERE BUILDS INSIDE A REQUEST. The route reads; when there is nothing to read it schedules
+ * a build (Inventory's force=1 semantics) and says so. Read-only: no write goes near it. */
+const BUNDLE_KEY_        = 'sbundle_v1';
+const BUNDLE_TTL_S_      = 21600;   // CacheService's ceiling. The parts carry their own ages.
+const BUNDLE_CHUNK_      = 90000;   // CacheService caps one entry at 100KB
+const BUNDLE_OFFHOURS_S_ = 3300;    // outside store hours nothing moves; rebuild ~hourly, not every 5 min
+const BUNDLE_KICK_KEY_   = 'sbundle_kick';
+const BUNDLE_KICK_S_     = 120;     // at most one scheduled build per two minutes, however many ask
+const BUNDLE_KICK_HANDLER_ = 'bundleKickRun';
+const BUNDLE_LAST_KEY_   = 'BUNDLE_LAST';
+
+/* Leaderboard's saveChunkedCache_ / getChunkedCache_, copied rather than routed through cacheSet_:
+ * that helper writes a PLAIN entry under 95KB and a chunked one over it, and cacheGet_ prefers the
+ * chunk meta when both exist — so a snapshot that shrank below the line would be read back as the
+ * older, larger one. Always-chunked has no such crossover. A missing chunk is a miss, never half a
+ * payload. */
+function bundleCacheSave_(json) {
+  const entries = {};
+  let n = 0;
+  for (let i = 0; i < json.length; i += BUNDLE_CHUNK_) entries[BUNDLE_KEY_ + '_' + (n++)] = json.slice(i, i + BUNDLE_CHUNK_);
+  entries[BUNDLE_KEY_ + '_meta'] = String(n);
+  CACHE.putAll(entries, BUNDLE_TTL_S_);
+}
+
+function bundleCacheRead_() {
+  try {
+    const count = parseInt(CACHE.get(BUNDLE_KEY_ + '_meta'), 10);
+    if (!count || count < 1) return null;
+    const keys = [];
+    for (let i = 0; i < count; i++) keys.push(BUNDLE_KEY_ + '_' + i);
+    const vals = CACHE.getAll(keys);
+    let json = '';
+    for (let i = 0; i < count; i++) {
+      const v = vals[BUNDLE_KEY_ + '_' + i];
+      if (!v) return null;
+      json += v;
+    }
+    return JSON.parse(json);
+  } catch (e) { return null; }
+}
+
+/* Today's figure as a phase=live answer, read out of the cache ONLY. Deliberately not
+ * getStoreSales_(…, 'live'): on a miss that pulls from Dutchie with the full retry budget, which is
+ * the retry bgRefreshToday_ refuses to spend and a build that belongs to nobody's request. The SHAPE
+ * must match getStoreSales_'s phase=live reply exactly — tests/opening_bundle_test.js runs both over
+ * the same entry and requires them to be identical, so the two cannot drift. */
+function bundleLiveHalf_(store, todayPT) {
+  const hit = cacheGet_(dtodayKey_(store, todayPT));
+  if (!hit) return null;
+  let r;
+  try { r = JSON.parse(hit); } catch (e) { return null; }
+  if (!r || !Number(r.as_of)) return null;   // an entry with no age is not current — same rule as the viewer path
+  const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+  const net = Number(r.netSales || 0), cogs = Number(r.cost || 0), ord = Number(r.orders || 0);
+  const weeklyMap = {};
+  (r.daily || []).forEach(function (d) {
+    const wk = getISOWeek(new Date(d.date + 'T12:00:00')) - 1;
+    weeklyMap['WK' + wk] = (weeklyMap['WK' + wk] || 0) + d.netSales;
+  });
+  return {
+    store: store, orders: ord,
+    netSales: r2(net), grossSales: r2(r.grossSales), discounts: r2(r.discounts),
+    cost: r2(cogs), tax: r2(r.tax), profit: r2(net - cogs),
+    aov: ord > 0 ? r2(net / ord) : 0,
+    margin: net > 0 ? Math.round((net - cogs) / net * 10000) / 100 : 0,
+    weekly: Object.keys(weeklyMap).sort(function (a, b) { return Number(a.slice(2)) - Number(b.slice(2)); })
+                  .map(function (l) { return { label: l, amount: weeklyMap[l] }; }),
+    topProducts: r.topProducts || [],
+    daily: (r.daily || []).slice().sort(function (a, b) { return a.date.localeCompare(b.date); })
+             .map(function (d) { return { date: d.date, netSales: d.netSales, grossSales: d.grossSales, orders: d.orders,
+                                          discounts: d.discounts, cogs: d.cogs || 0, tax: d.tax || 0 }; }),
+    cacheRows: 0, liveOrders: ord, liveAsOf: Number(r.as_of), phase: 'live',
+  };
+}
+
+/* One part, built by its own route's function, inside its own try. `check` decides whether an answer
+ * is a real one: several of these routes answer a failure with a 200 and an {error} body, and a
+ * snapshot that stored that as data would serve it for hours. */
+function bundlePart_(name, prevParts, build, check) {
+  const t0 = Date.now();
+  try {
+    const data = build();
+    const why  = check(data);
+    if (why) throw new Error(why);
+    return { ok: true, as_of: t0, data: data };
+  } catch (e) {
+    const err  = errText_(e);
+    const prev = prevParts && prevParts[name];
+    if (prev && prev.ok && prev.data != null) {
+      return { ok: true, as_of: prev.as_of, data: prev.data, stale: true, error: err };
+    }
+    return { ok: false, error: err };
+  }
+}
+
+function bundleBody_(out) { return JSON.parse(out.getContent()); }
+
+function bundleBuild_(prev) {
+  const t0      = Date.now();
+  const todayPT = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
+  const monthPT = todayPT.slice(0, 7);
+  const from    = monthPT + '-01';
+  // The previous snapshot's parts are carried only within the same day: a pace fraction, a day's
+  // period goal or a today figure from yesterday is not a stale copy of today's, it is a different
+  // answer. The whole-month pieces (stores, goals, other revenue) carry across a day line.
+  const sameDay   = !!(prev && prev.today_pt === todayPT);
+  const prevParts = prev && prev.parts ? prev.parts : {};
+  const dayParts  = sameDay ? prevParts : {};
+  const parts = {};
+
+  parts.stores = bundlePart_('stores', prevParts, function () { return bundleBody_(getStoresMeta_()); },
+    function (d) { return d && Array.isArray(d.stores) && d.stores.length ? '' : 'store registry answered no stores'; });
+  parts.goals = bundlePart_('goals', prevParts, function () { return bundleBody_(getGoals()); },
+    function (d) { return d && d.goals && !d.error ? '' : ((d && d.error) || 'no goals'); });
+  parts.otherrev = bundlePart_('otherrev', prevParts, function () { return bundleBody_(getOtherRevenue()); },
+    function (d) { return d && !d.error ? '' : ((d && d.error) || 'no other revenue'); });
+  parts.pg_range = bundlePart_('pg_range', dayParts, function () { return bundleBody_(getPeriodGoalsRange_(todayPT, todayPT)); },
+    function (d) { return d && d.ok && Array.isArray(d.periods) ? '' : ((d && d.error) || 'no period goal range'); });
+  parts.pg_day = bundlePart_('pg_day', dayParts, function () { return bundleBody_(getPeriodGoalsForDate_(todayPT)); },
+    function (d) { return d && d.ok ? '' : ((d && d.error) || 'no period goals'); });
+  parts.pace = bundlePart_('pace', dayParts, function () { return bundleBody_(getPacingFracs_()); },
+    function (d) { return d && d.ok && d.fracs && Object.keys(d.fracs).length ? '' : 'no pace curve'; });
+
+  /* SALES, PER STORE. The settled half is the month from the 1st through yesterday — the same
+   * question, the same cache key and the same GX Core read as the client's own phase=settled ask.
+   * getStoreSales_ DEGRADES a getSalesDaily failure to zero rows rather than erroring (right for a
+   * live request, which still has today to show); here that would be a confident empty month cached
+   * for hours, so a month that has settled days and came back with none is treated as a failure. */
+  const prevSales  = sameDay && prevParts.sales && prevParts.sales.data ? (prevParts.sales.data.stores || {}) : {};
+  const hasSettled = from < todayPT;
+  const stores = {}, missing = [];
+  let names = [];
+  try { names = salesStores_().map(function (s) { return s.sales; }); } catch (e) { names = []; }
+  names.forEach(function (name) {
+    let settled = null, settledErr = '';
+    try {
+      const b = bundleBody_(getStoreSales_(name, from, todayPT, false, 'settled'));
+      if (b.error) throw new Error(b.error);
+      if (b.phase !== 'settled') throw new Error('settled half answered phase ' + b.phase);
+      if (hasSettled && !Number(b.cacheRows)) throw new Error('no settled days came back');
+      settled = b;
+    } catch (e) { settledErr = errText_(e); }
+    const live = bundleLiveHalf_(name, todayPT);
+    const was  = prevSales[name];
+    if (settled) {
+      stores[name] = { settled: settled, settled_as_of: t0, live: live || (was && was.live) || null };
+    } else if (was && was.settled) {
+      stores[name] = { settled: was.settled, settled_as_of: was.settled_as_of, live: live || was.live || null,
+                       stale: true, error: settledErr };
+    } else {
+      missing.push(name);
+    }
+  });
+  parts.sales = names.length && !missing.length
+    ? { ok: true, as_of: t0, data: { stores: stores } }
+    : { ok: false, as_of: t0, error: names.length ? 'no settled month for ' + missing.join(', ') : 'store list unavailable',
+        data: { stores: stores, missing: missing } };
+
+  return { ok: true, v: 1, built_at: t0, build_ms: Date.now() - t0, today_pt: todayPT, month: monthPT, parts: parts };
+}
+
+/* Builds and stores the snapshot. The USER lock, tryLock(0), for Leaderboard's reason: a run that
+ * finds one already going has nothing to add, and the script lock is bugMailOnce_'s. */
+function bundleRefresh_(force) {
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(0)) return { ok: true, skipped: 'a build is already running' };
+  try {
+    const prev = bundleCacheRead_();
+    const now  = new Date();
+    const todayPT = Utilities.formatDate(now, 'America/Los_Angeles', 'yyyy-MM-dd');
+    if (!force && !bgInStoreHours_(now) && prev && prev.today_pt === todayPT
+        && Date.now() - Number(prev.built_at || 0) < BUNDLE_OFFHOURS_S_ * 1000) {
+      return { ok: true, skipped: 'outside store hours, snapshot is recent' };
+    }
+    const snap = bundleBuild_(prev);
+    const json = JSON.stringify(snap);
+    bundleCacheSave_(json);
+    const summary = { at: now.toISOString(), ms: snap.build_ms, bytes: json.length, parts: {} };
+    Object.keys(snap.parts).forEach(function (k) {
+      const p = snap.parts[k];
+      summary.parts[k] = p.ok ? (p.stale ? 'stale: ' + p.error : 'ok') : 'FAILED: ' + p.error;
+    });
+    try { PropertiesService.getScriptProperties().setProperty(BUNDLE_LAST_KEY_, JSON.stringify(summary)); } catch (e) {}
+    return { ok: true, built: summary };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* One-off trigger target for a build the ROUTE asked for. Deletes its own trigger first, the way
+ * Inventory's _runOperationalWarmTrigger does, so a kick never accumulates. */
+function bundleKickRun() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === BUNDLE_KICK_HANDLER_; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  bundleRefresh_(true);
+}
+
+/* Schedule, never block. Throttled in the shared cache, so a crowd opening a cold app schedules one
+ * build rather than one each. Returns whether THIS call scheduled it. */
+function bundleKick_() {
+  try {
+    if (CACHE.get(BUNDLE_KICK_KEY_)) return false;
+    CACHE.put(BUNDLE_KICK_KEY_, String(Date.now()), BUNDLE_KICK_S_);
+    ScriptApp.newTrigger(BUNDLE_KICK_HANDLER_).timeBased().after(1000).create();
+    return true;
+  } catch (e) {
+    Logger.log('bundleKick_ failed: ' + errText_(e));
+    return false;
+  }
+}
+
+/* ?action=bundle — the whole opening view in one answer, or as much of it as exists. */
+function getBundle_() {
+  const snap    = bundleCacheRead_();
+  const todayPT = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
+  if (!snap) {
+    return { ok: false, error: 'bundle_missing', refreshScheduled: bundleKick_(), today_pt: todayPT };
+  }
+  // A snapshot from before midnight is still returned — the client ignores a day it is not showing —
+  // but a new build is asked for, since the trigger may be outside store hours and hourly.
+  const fresh = snap.today_pt === todayPT;
+  const out = Object.assign({}, snap, { age_s: Math.round((Date.now() - Number(snap.built_at || 0)) / 1000) });
+  if (!fresh) out.refreshScheduled = bundleKick_();
+  return out;
+}
+
+function bundleStatus_() {
+  let last = null;
+  try { last = JSON.parse(PropertiesService.getScriptProperties().getProperty(BUNDLE_LAST_KEY_) || 'null'); } catch (e) {}
+  const snap = bundleCacheRead_();
+  return {
+    last_build: last,
+    present: !!snap,
+    today_pt: snap ? snap.today_pt : null,
+    age_s: snap ? Math.round((Date.now() - Number(snap.built_at || 0)) / 1000) : null,
+  };
 }
 
 function dutchieTodayFetchLive_(store, todayPT, toISO) {

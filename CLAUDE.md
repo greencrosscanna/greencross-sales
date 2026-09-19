@@ -815,6 +815,58 @@ before reporting — the same flaw this file already records about the 09-15 num
 and the reason a single `!!!!!!` row is doing all the work above. **One run, one window; the shape
 is strong evidence and the rate is not a baseline.**
 
+### Two more runs: windows, yes — but they do not take EVERYTHING (2026-09-18, 09:20 and 17:47 PT)
+
+Same instrument, same shape (`libversion`, 240 requests, six-wide), log at
+`tools/stall-log/2026-09-18-0920.txt` (gitignored; saved by the morning scheduled probe).
+
+```
+requests 240 · median 1.9s · p95 12.0s · worst 35.2s · STALLS >=10s  18 = 7.5% · one 404
+round 18  .....!   19  !!..!.   20  !.!!..   21  !!.!!!   22  .....!    <- 13 of 18 stalls
+round 11  .!!...   14  .!..!.   28  ..!...                              <- the other 5
+```
+
+**It confirms the clustering and corrects the "takes everything in flight" half.** 13 of 18 stalls
+sit in five consecutive rounds — one degraded stretch of roughly 2.5 minutes, four of those rounds
+each carrying a ~30s request. Independence is refuted a second time. But **no round lost all six**;
+the worst was round 21 at five of six. So the 09-17 `!!!!!!` was one window, not the rule: a
+window is a stretch where MOST requests stall, lasting minutes rather than ~27 seconds, with the
+rest scattered outside it.
+
+- **The bullet above that says a load inside a window "loses every request it has in the air" is
+  too strong.** Read it as *loses most of them*. The practical difference: some stores land and
+  some do not, which is the partial-total shape the hero's `n/6 stores` readout already reports —
+  not a blank screen.
+- **A window that lasts minutes outlasts the retry ladder** (12s + 25s). A retry fired inside it
+  mostly lands inside it too. That is an observation about why a bad stretch hurts, **not a reason
+  to re-tune** — two runs, two different window shapes, and the section's rule stands: decide on a
+  distribution, not on a run.
+- **Compare 7.5% to the 09-17 run's 2.5%, never to the 3.4% baseline** — same instrument versus a
+  different measurement. And even 2.5% → 7.5% is two runs at two hours; with stalls arriving in
+  windows, the rate mostly measures whether a run happened to catch one.
+- **Resolution is still one round.** Per-request `(start, duration)` pairs would say whether round
+  21's one clean request started before or after the window. Still not kept.
+
+**The 17:47 run the same day says the same thing, more mildly** (`2026-09-18-1747.txt`):
+
+```
+requests 240 · median 1.8s · p95 9.5s · worst 104.3s · STALLS >=10s  10 = 4.2% · one 404
+round 13  .!....   16  !!....   17  ..!!..   19  !....!   20  !.!...    <- 9 of 10 stalls
+round 34  ..!...                                                        <- the other 1
+```
+
+One bad stretch again (rounds 13–20), clean on both sides of it. This time **no round lost more
+than two of six.** So there are three readings: 6/6 (09-17), 5/6 at worst (09-18 AM), and 2/6 at
+worst (09-18 PM). Bunching in time holds in all three, and even scatter holds in none.
+**The 09-17 `!!!!!!` is the extreme case, not the typical one.** Three runs is still a hint and
+not a distribution. Nothing was re-tuned.
+
+- **One request took 104.3s**, well past the ~60s at which Google usually closes the connection
+  (four of the 09-15 stalls ended exactly there). The app never waits that long, because its
+  ceilings abandon a request at 12s/25s, so this costs the app nothing extra. It does mean
+  "60s is the hop's upper bound" is not a safe assumption for anything that waits without a
+  ceiling of its own.
+
 ## …and twenty-one OTHER calls had no ceiling at all (v2.608, 2026-09-17)
 
 The ladder below was built for the twelve store halves and given to nothing else. **Twenty-one of

@@ -45,6 +45,8 @@ function grabFrom(src, name) {
   throw new Error('unbalanced: ' + name);
 }
 const gs   = n => grabFrom(GS, n);
+/** What a caller actually gets back from one of these handlers. */
+const body = out => JSON.parse(out.getContent());
 const html = n => grabFrom(HTML, n);
 
 // ── The backend, run against a fake ScriptProperties ──────────────────────────────────────────
@@ -60,7 +62,13 @@ function backend(initialProps) {
       }),
     },
     MONTHS_12_: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
-    jsonOut_: o => { replies.push(o); return o; },
+    /* THE RUNTIME'S jsonOut_ RETURNS A ContentService TextOutput, NOT THE OBJECT.
+     * This fake returned the object, which is convenient and is why it let a real defect
+     * through: adminAtmPaid_ read `.ok` off the return value, always undefined, and
+     * reported every month of a perfectly good batch as failed. Measured live before this
+     * was fixed. A fixture easier to use than the runtime is a fixture that tests something
+     * else, so this one now behaves like ContentService and every assertion reads the body. */
+    jsonOut_: o => { replies.push(o); return { getContent: () => JSON.stringify(o) }; },
     errText_: e => 'scrubbed: ' + e.message,
     JSON, String, Number, Date, Object,
   };
@@ -77,7 +85,7 @@ function backend(initialProps) {
 console.log('\n1. marking a month paid, and the mark surviving as data');
 {
   const b = backend({});
-  const r = b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: '1', _user: 'sky' });
+  const r = body(b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: '1', _user: 'sky' }));
   ok('the write reports ok', r.ok === true && r.paid === true);
   const stored = JSON.parse(b.props['rev_atmpaid_2026']);
   ok('stored under the year, keyed by month', !!stored.Jul && stored.Jul.paid === true);
@@ -90,7 +98,7 @@ console.log('\n1. marking a month paid, and the mark surviving as data');
 console.log('\n2. unpaid is the ABSENCE of a mark, not a stored false');
 {
   const b = backend({ 'rev_atmpaid_2026': JSON.stringify({ Jul: { paid: true, by: 'sky' }, Aug: { paid: true } }) });
-  const r = b.ctx.setAtmPaid_({ year: '2026', month: 'Aug', paid: '0', _user: 'sky' });
+  const r = body(b.ctx.setAtmPaid_({ year: '2026', month: 'Aug', paid: '0', _user: 'sky' }));
   ok('the write reports ok and paid:false', r.ok === true && r.paid === false);
   const stored = JSON.parse(b.props['rev_atmpaid_2026']);
   ok('the un-marked month is GONE, not stored as false', !('Aug' in stored));
@@ -103,21 +111,21 @@ console.log('\n3. `paid=false` is a STRING, and a truthy read would mark it PAID
   // would store paid:true for a click that said unpaid — silently writing the opposite.
   const b = backend({ 'rev_atmpaid_2026': JSON.stringify({ Sep: { paid: true } }) });
   ok("the string 'false' un-marks",
-     b.ctx.setAtmPaid_({ year: '2026', month: 'Sep', paid: 'false' }).paid === false);
+     body(b.ctx.setAtmPaid_({ year: '2026', month: 'Sep', paid: 'false' })).paid === false);
   ok('...and the month is actually gone from the store',
      !('Sep' in JSON.parse(b.props['rev_atmpaid_2026'])));
   const b2 = backend({});
   ok("the string 'true' marks",
-     b2.ctx.setAtmPaid_({ year: '2026', month: 'Sep', paid: 'true' }).paid === true);
+     body(b2.ctx.setAtmPaid_({ year: '2026', month: 'Sep', paid: 'true' })).paid === true);
 }
 
 console.log('\n4. everything else is refused rather than guessed');
 {
   const b = backend({});
-  ok('a bad year',    b.ctx.setAtmPaid_({ year: '26', month: 'Jul', paid: '1' }).error === 'invalid year');
-  ok('a bad month',   b.ctx.setAtmPaid_({ year: '2026', month: 'July', paid: '1' }).error === 'invalid month');
-  ok('a missing paid',b.ctx.setAtmPaid_({ year: '2026', month: 'Jul' }).error === 'invalid paid');
-  ok('a junk paid',   b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: 'yes' }).error === 'invalid paid');
+  ok('a bad year',    body(b.ctx.setAtmPaid_({ year: '26', month: 'Jul', paid: '1' })).error === 'invalid year');
+  ok('a bad month',   body(b.ctx.setAtmPaid_({ year: '2026', month: 'July', paid: '1' })).error === 'invalid month');
+  ok('a missing paid',body(b.ctx.setAtmPaid_({ year: '2026', month: 'Jul' })).error === 'invalid paid');
+  ok('a junk paid',   body(b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: 'yes' })).error === 'invalid paid');
   ok('nothing was written by any refusal', b.props['rev_atmpaid_2026'] === undefined);
 }
 
@@ -126,7 +134,7 @@ console.log('\n5. a corrupt flag costs the flag, never the figures');
   const b = backend({ 'rev_atmpaid_2026': '{not json' });
   ok('a half-written property reads as no marks', JSON.stringify(b.ctx.getAtmPaidData_('2026')) === '{}');
   ok('...and a later write still succeeds',
-     b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: '1' }).ok === true);
+     body(b.ctx.setAtmPaid_({ year: '2026', month: 'Jul', paid: '1' })).ok === true);
 }
 
 console.log('\n6. the route is write-guarded and carries the user');
@@ -233,7 +241,7 @@ console.log('\n11. the secret-gated backfill — month NAMES only, and only what
   const figures = { Jan: { Bend: { 'ATM 1': 900 } }, Feb: { Bend: { 'ATM 1': 800 } },
                     Mar: { Bend: { 'ATM 1': 0 } } };   // Mar reported as zero == not reported
   const b = backend({ 'rev_atm_2026': JSON.stringify(figures) });
-  const r = b.ctx.adminAtmPaid_({ year: '2026', months: 'all', secret: 'x' });
+  const r = body(b.ctx.adminAtmPaid_({ year: '2026', months: 'all', secret: 'x' }));
   ok('it reports ok', r.ok === true);
   ok('the reported months are marked', r.marked.join(',') === 'Jan,Feb');
   ok('a month with NO figures is skipped, not marked',
@@ -243,15 +251,15 @@ console.log('\n11. the secret-gated backfill — month NAMES only, and only what
   ok('the vendor figures are untouched', b.props['rev_atm_2026'] === JSON.stringify(figures));
 
   const named = backend({ 'rev_atm_2025': JSON.stringify({ Jan: { Bend: { 'ATM 1': 5 } }, Jun: { Bend: { 'ATM 1': 5 } } }) });
-  const rn = named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan, Jun' });
+  const rn = body(named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan, Jun' }));
   ok('an explicit list works and is trimmed', rn.marked.join(',') === 'Jan,Jun');
   ok('a bad month name is refused as a batch, marking nothing',
-     named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan,Jly' }).error === 'invalid month(s): Jly');
-  ok('a bad year is refused', named.ctx.adminAtmPaid_({ year: '25', months: 'all' }).ok === false);
+     body(named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan,Jly' })).error === 'invalid month(s): Jly');
+  ok('a bad year is refused', body(named.ctx.adminAtmPaid_({ year: '25', months: 'all' })).ok === false);
   ok('no months is refused rather than meaning all',
-     named.ctx.adminAtmPaid_({ year: '2025' }).error === 'months= is required (comma-separated, or all)');
+     body(named.ctx.adminAtmPaid_({ year: '2025' })).error === 'months= is required (comma-separated, or all)');
   ok('it can UN-mark too, and then the reported gate does not apply',
-     named.ctx.adminAtmPaid_({ year: '2025', months: 'all', paid: '0' }).marked.length === 12);
+     body(named.ctx.adminAtmPaid_({ year: '2025', months: 'all', paid: '0' })).marked.length === 12);
   ok('...leaving no residue', JSON.stringify(named.ctx.getAtmPaidData_('2025')) === '{}');
   ok('the route is behind the deploy secret, in the block that already gates admin writes',
      /params\.action === 'admin_atm_paid'\)/.test(GS)

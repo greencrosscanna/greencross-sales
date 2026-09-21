@@ -4627,12 +4627,22 @@ function adminAtmPaid_(params) {
     reported[m] = txns > 0;
   });
 
+  /* `setAtmPaid_` returns what every handler here returns — a ContentService TextOutput, not the
+   * object it serialized. Reading `.ok` off it is always undefined, so a batch that wrote
+   * perfectly reported every month as failed. Measured live on 2026-09-21: six months marked, six
+   * reported `failed: unknown`, `ok:false` over a reply whose own `now` showed all six paid. The
+   * data was right and the answer was wrong, which is the more dangerous half — it invites a
+   * re-run of a write that already succeeded.
+   *
+   * Parse the body, the same way `adminApplyProposed_` reads `applyBudget_`. */
   const marked = [], skipped = [], failed = {};
   want.forEach(function (m) {
     if (paid && !reported[m]) { skipped.push(m); return; }   // nothing reported, so nothing owed
-    const res = setAtmPaid_({ year: year, month: m, paid: paid ? '1' : '0', _user: 'admin:secret' });
-    if (res && res.ok) marked.push(m);
-    else failed[m] = (res && res.error) || 'unknown';
+    let body = null;
+    try { body = JSON.parse(setAtmPaid_({ year: year, month: m, paid: paid ? '1' : '0',
+                                          _user: 'admin:secret' }).getContent()); } catch (e) {}
+    if (body && body.ok) marked.push(m);
+    else failed[m] = (body && body.error) || 'could not read the write result';
   });
 
   return jsonOut_({ ok: !Object.keys(failed).length, year: year, paid: paid,

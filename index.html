@@ -1443,7 +1443,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.611';
+const APP_VERSION = 'v2.612';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -3532,11 +3532,24 @@ function updateCacheStatus() {
   if (!el) return;
   if (keys.length === 0) { el.textContent = 'No cache'; return; }
   const salesKeys = keys.filter(isSalesCacheKey_);
+  /* NOT EVERY CACHED ENTRY CARRIES A `ts`, AND ONE THAT DOES NOT USED TO POISON THE WHOLE FIGURE.
+   * `gc_sales_open_bundle` (v2.611) is the stored snapshot exactly as the server built it - its
+   * ages are per-part `as_of`, so there is no top-level `ts`. It parses fine, so the try/catch
+   * never fires; `Math.min(min, undefined)` is NaN, and NaN then survives every later Math.min,
+   * so ONE ts-less entry rendered the readout as `oldest NaNh ago`. Skip what cannot answer, and
+   * say nothing rather than a number when nothing can. */
   const oldest = keys.reduce((min, k) => {
-    try { return Math.min(min, JSON.parse(localStorage.getItem(k)).ts); } catch { return min; }
+    try {
+      const t = JSON.parse(localStorage.getItem(k)).ts;
+      return (typeof t === 'number' && isFinite(t)) ? Math.min(min, t) : min;
+    } catch { return min; }
   }, Infinity);
-  const mins = Math.round((Date.now() - oldest) / 60000);
-  el.textContent = `${keys.length} item${keys.length>1?'s':''} cached (${salesKeys.length} sales months) · oldest ${mins < 60 ? mins+'m' : Math.round(mins/60)+'h'} ago`;
+  let age = '';
+  if (isFinite(oldest)) {
+    const mins = Math.round((Date.now() - oldest) / 60000);
+    age = ` · oldest ${mins < 60 ? mins+'m' : Math.round(mins/60)+'h'} ago`;
+  }
+  el.textContent = `${keys.length} item${keys.length>1?'s':''} cached (${salesKeys.length} sales months)${age}`;
 }
 
 // Silently fill in daily sales for every prior month of the active year, so the day-of-week chart

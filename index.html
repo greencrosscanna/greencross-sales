@@ -6920,6 +6920,22 @@ function atmMonthRev_(month) {
 
 function atmMonthPaid_(month) { return !!(revenueDetail?.paid?.[month]?.paid); }
 
+/* "THE BACKEND DOES NOT KNOW ABOUT PAYMENTS" AND "NOTHING HAS BEEN PAID" ARE DIFFERENT ANSWERS.
+ *
+ * The engine is deployed separately from this page, so the page can be live against an engine
+ * that has never heard of `paid` — the reply simply has no such field. Read that as unpaid and
+ * every reported month is flagged as an outstanding payment: six amber markers and a total owed,
+ * all fabricated out of a field's absence. That is the River shape, and here it points at money.
+ *
+ * An absent `paid` therefore says NOTHING — no chip, no line, no markers. An empty `{}` is a real
+ * answer from an engine that has the feature and holds no marks yet, so it reports normally. The
+ * deploy order stops mattering, which is worth more than the one-line check costs.
+ */
+function atmPaidSupported_() {
+  const p = revenueDetail?.paid;
+  return !!p && typeof p === 'object' && !Array.isArray(p);
+}
+
 /* A MONTH WITH NO FIGURES IS NOT OUTSTANDING — IT IS UNREPORTED, WHICH IS A DIFFERENT QUESTION.
  *
  * Listing every unpaid month would name all twelve in January and read as twelve missing
@@ -6929,6 +6945,7 @@ function atmMonthPaid_(month) { return !!(revenueDetail?.paid?.[month]?.paid); }
  */
 function atmOutstanding_() {
   const out = [];
+  if (!atmPaidSupported_()) return out;   // nothing is known to be owed, so nothing is claimed
   REV_MONTHS_.forEach(m => {
     const rev = atmMonthRev_(m);
     if (rev > 0 && !atmMonthPaid_(m)) out.push({ month: m, rev });
@@ -6964,8 +6981,9 @@ function renderRevenue() {
     const mo = i + 1;
     const on = mo === activeMo ? ' on' : '';
     const rev = atmMonthRev_(m);
-    const mark = rev <= 0 ? '' : (atmMonthPaid_(m) ? ' rev-mo-paid' : ' rev-mo-owed');
-    const tip = rev <= 0 ? '' : (atmMonthPaid_(m) ? ` title="ATM paid"` : ` title="ATM reported, payment outstanding"`);
+    const marked = atmPaidSupported_() && rev > 0;
+    const mark = !marked ? '' : (atmMonthPaid_(m) ? ' rev-mo-paid' : ' rev-mo-owed');
+    const tip = !marked ? '' : (atmMonthPaid_(m) ? ` title="ATM paid"` : ` title="ATM reported, payment outstanding"`);
     return `<button class="rev-mo-btn${on}${mark}"${tip} onclick="setRevMonth(${mo})">${m}</button>`;
   }).join('');
 
@@ -7052,7 +7070,7 @@ function renderRevenue() {
    * "awaiting payment" over an empty month is the $0-hero error again - a confident statement
    * about a question nobody has answered yet. */
   const monthPaid = atmMonthPaid_(month);
-  const atmPaidChip = atmGrandRev <= 0 ? '' : (monthPaid
+  const atmPaidChip = (atmGrandRev <= 0 || !atmPaidSupported_()) ? '' : (monthPaid
     ? `<button class="rev-paid-chip is-paid" onclick="toggleAtmPaid('${month}', false)" title="Mark as not yet paid">Paid</button>`
     : `<button class="rev-paid-chip is-owed" onclick="toggleAtmPaid('${month}', true)" title="Mark this month's payment as received">Awaiting payment</button>`);
 

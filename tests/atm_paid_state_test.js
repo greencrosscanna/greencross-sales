@@ -139,11 +139,12 @@ function frontend(detail) {
   const ctx = {
     revenueDetail: detail,
     STORES: [{ name: 'Bend' }, { name: 'Center' }],
-    Number, Math, Object, JSON,
+    Number, Math, Object, JSON, Array,
   };
   vm.createContext(ctx);
   const months = /const REV_MONTHS_ = \[[^\]]*\];/.exec(HTML)[0];
-  vm.runInContext([months, html('atmMonthRev_'), html('atmMonthPaid_'), html('atmOutstanding_')].join('\n'), ctx);
+  vm.runInContext([months, html('atmMonthRev_'), html('atmMonthPaid_'), html('atmPaidSupported_'),
+                   html('atmOutstanding_')].join('\n'), ctx);
   return ctx;
 }
 
@@ -179,14 +180,21 @@ console.log('\n8. a month with NO figures is unreported, which is a different qu
      frontend({ cfg: DETAIL.cfg, atm: {}, paid: {} }).atmOutstanding_().length === 0);
 }
 
-console.log('\n9. a payload with no paid map at all must not read as "all paid"');
+console.log('\n9. NO paid map at all is a different answer from "nothing paid"');
 {
-  // The hazard runs the other way too: an OLD cached payload (pre-v2.613) carries no `paid`, and
-  // reading a missing map as paid would silence the whole feature. The client cache key is bumped
-  // so such an entry is orphaned, and the reader treats absent as unpaid regardless.
+  /* The page and the engine deploy separately, so this page can run against an engine that has
+   * never heard of `paid` — and an old cached payload has the same shape. Reading absent as
+   * unpaid would invent an outstanding payment for every reported month: amber markers and a
+   * total owed, fabricated from a missing field. It must claim nothing instead. */
   const f = frontend({ cfg: DETAIL.cfg, atm: DETAIL.atm });
-  ok('no paid map means no month is paid', f.atmMonthPaid_('Jul') === false);
-  ok('...so every reported month is outstanding', f.atmOutstanding_().length === 3);
+  ok('the feature reports itself unsupported', f.atmPaidSupported_() === false);
+  ok('no month is claimed paid', f.atmMonthPaid_('Jul') === false);
+  ok('...and NOTHING is claimed outstanding either', f.atmOutstanding_().length === 0);
+  const empty = frontend({ cfg: DETAIL.cfg, atm: DETAIL.atm, paid: {} });
+  ok('an EMPTY map is a real answer — supported, nothing marked', empty.atmPaidSupported_() === true);
+  ok('...so it reports all three reported months as outstanding', empty.atmOutstanding_().length === 3);
+  ok('the chip is withheld when the engine cannot answer', /!atmPaidSupported_\(\)\) \? '' :/.test(HTML));
+  ok('the pill markers are too', /const marked = atmPaidSupported_\(\) && rev > 0;/.test(HTML));
   ok('and the cache key was bumped so a pre-v2.613 entry is not trusted',
      /rev_detail_v2_/.test(HTML) && !/writeCache\('rev_detail_' \+ year/.test(HTML));
 }
@@ -194,13 +202,13 @@ console.log('\n9. a payload with no paid map at all must not read as "all paid"'
 console.log('\n10. the UI states it where the question is asked, and writes once');
 {
   ok('the chip is withheld when the month has no figures',
-     /atmGrandRev <= 0 \? '' : \(monthPaid/.test(HTML));
+     /atmGrandRev <= 0 \|\| !atmPaidSupported_\(\)\) \? '' : \(monthPaid/.test(HTML));
   ok('the outstanding line renders only when something is outstanding',
      /const atmOwedLine = !owed\.length \? '' :/.test(HTML));
   ok('the month pills carry the year-wide state',
      /rev-mo-paid/.test(HTML) && /rev-mo-owed/.test(HTML));
   ok('a month with no figures gets no pill marker',
-     /const mark = rev <= 0 \? '' :/.test(HTML));
+     /const marked = atmPaidSupported_\(\) && rev > 0;/.test(HTML));
   const t = html('toggleAtmPaid');
   ok('the mark is a WRITE — one attempt, never re-sent', /WRITE_CAPS_/.test(t));
   ok('local state comes from the RESULT, not from what was asked',

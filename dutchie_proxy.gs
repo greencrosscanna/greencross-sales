@@ -1294,9 +1294,11 @@ function doGet(e) {
   // freeze_sheet is gone with the sheet readers it depended on — the snapshot it took is now the
   // source of truth, not a cache of one. freezestatus remains: it reads only properties and is how
   // you confirm what the app is serving.
-  if (params.action === 'freezestatus' || params.action === 'admin_apply_proposed') {
+  if (params.action === 'freezestatus' || params.action === 'admin_apply_proposed'
+      || params.action === 'admin_atm_paid') {
     const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
     if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
+    if (params.action === 'admin_atm_paid')  return adminAtmPaid_(params);
     return params.action === 'freezestatus' ? freezeStatus_() : adminApplyProposed_(params);
   }
 
@@ -4572,6 +4574,70 @@ function setRevenueLine(params) {
   } catch(e) {
     return jsonOut_({ ok: false, error: errText_(e) });
   }
+}
+
+/**
+ * action=admin_atm_paid — mark whole months' ATM payments as received, from a terminal.
+ *
+ * `set_atm_paid` sits behind the session gate and the write guard, which is right for a person
+ * tapping a chip. This exists for the one case that is not that: BACKFILLING the history the
+ * feature arrived after. Every ATM month already reported reads as awaiting payment on day one,
+ * and the true answer for the closed months is known — Sky's, 2026-09-21: Jan-Jun 2026 and all of
+ * 2025 are paid.
+ *
+ * Deliberately NARROWER than the route it complements, the same property that makes
+ * admin_apply_proposed defensible: it takes month NAMES and sets one boolean. There is no figure
+ * it can write and nothing it can invent — the numbers are the vendor's report and are untouched.
+ * Same secret that gates `guardmode`, which can switch the write guard off outright, so this
+ * grants strictly less than the secret already carries.
+ *
+ * `months=all` means every month that HAS a reported figure, never all twelve: a mark on an empty
+ * month is a claim about a payment that was never reported, and the whole point of the feature is
+ * that reported and paid are different facts. Months with nothing are reported back as skipped.
+ */
+function adminAtmPaid_(params) {
+  const year = String((params && params.year) || '');
+  if (!/^[0-9]{4}$/.test(year)) return jsonOut_({ ok: false, error: 'year= is required (YYYY)' });
+  const paidArg = String(params.paid == null ? '1' : params.paid).toLowerCase();
+  if (!['1','0','true','false'].includes(paidArg)) return jsonOut_({ ok: false, error: 'invalid paid' });
+  const paid = (paidArg === '1' || paidArg === 'true');
+
+  const asked = String(params.months || '').trim();
+  if (!asked) return jsonOut_({ ok: false, error: 'months= is required (comma-separated, or all)' });
+
+  let want;
+  if (asked.toLowerCase() === 'all') want = MONTHS_12_.slice();
+  else {
+    want = asked.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    const bad = want.filter(function (m) { return MONTHS_12_.indexOf(m) < 0; });
+    if (bad.length) return jsonOut_({ ok: false, error: 'invalid month(s): ' + bad.join(', ') });
+  }
+
+  // "Reported" is any non-zero transaction count anywhere in the month. Read from the same
+  // property the tab renders, so this cannot disagree with what the screen shows.
+  const figures = getRevYearData_('atm', year);
+  const reported = {};
+  MONTHS_12_.forEach(function (m) {
+    let txns = 0;
+    const byStore = figures[m] || {};
+    Object.keys(byStore).forEach(function (st) {
+      const byMachine = byStore[st] || {};
+      Object.keys(byMachine).forEach(function (mc) { txns += Number(byMachine[mc] || 0); });
+    });
+    reported[m] = txns > 0;
+  });
+
+  const marked = [], skipped = [], failed = {};
+  want.forEach(function (m) {
+    if (paid && !reported[m]) { skipped.push(m); return; }   // nothing reported, so nothing owed
+    const res = setAtmPaid_({ year: year, month: m, paid: paid ? '1' : '0', _user: 'admin:secret' });
+    if (res && res.ok) marked.push(m);
+    else failed[m] = (res && res.error) || 'unknown';
+  });
+
+  return jsonOut_({ ok: !Object.keys(failed).length, year: year, paid: paid,
+                    marked: marked, skipped_no_figures: skipped, failed: failed,
+                    now: getAtmPaidData_(year) });
 }
 
 function reportBug_(params, reporter) {

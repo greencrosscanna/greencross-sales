@@ -65,7 +65,12 @@ function backend(initialProps) {
     JSON, String, Number, Date, Object,
   };
   vm.createContext(ctx);
-  vm.runInContext([gs('atmPaidProp_'), gs('getAtmPaidData_'), gs('setAtmPaid_')].join('\n'), ctx);
+  ctx.getRevYearData_ = function (type, year) {
+    const raw = ctx.PropertiesService.getScriptProperties().getProperty('rev_' + type + '_' + year);
+    return raw ? JSON.parse(raw) : {};
+  };
+  vm.runInContext([gs('atmPaidProp_'), gs('getAtmPaidData_'), gs('setAtmPaid_'),
+                   gs('adminAtmPaid_')].join('\n'), ctx);
   return { ctx, props, replies };
 }
 
@@ -216,6 +221,42 @@ console.log('\n10. the UI states it where the question is asked, and writes once
   ok('a refusal names read-only rather than "save failed"', /read_only/.test(t));
   ok('a failure is reported in the block, not in the Settings drawer',
      /rev-paid-err/.test(t) && !/showErr\(/.test(t));
+}
+
+console.log('\n11. the secret-gated backfill — month NAMES only, and only what was reported');
+{
+  /* The feature arrived after the history, so every already-reported month reads as awaiting
+   * payment on day one. Sky's answer for the closed ones (2026-09-21) is that Jan-Jun 2026 and
+   * all of 2025 are paid. This is the route that applies that from a terminal; it takes names and
+   * sets one boolean, so there is no figure it can write — the property that makes a secret-gated
+   * write defensible, borrowed from admin_apply_proposed. */
+  const figures = { Jan: { Bend: { 'ATM 1': 900 } }, Feb: { Bend: { 'ATM 1': 800 } },
+                    Mar: { Bend: { 'ATM 1': 0 } } };   // Mar reported as zero == not reported
+  const b = backend({ 'rev_atm_2026': JSON.stringify(figures) });
+  const r = b.ctx.adminAtmPaid_({ year: '2026', months: 'all', secret: 'x' });
+  ok('it reports ok', r.ok === true);
+  ok('the reported months are marked', r.marked.join(',') === 'Jan,Feb');
+  ok('a month with NO figures is skipped, not marked',
+     r.skipped_no_figures.indexOf('Mar') >= 0 && r.skipped_no_figures.length === 10);
+  ok('...because a mark there would claim a payment nobody reported', !('Mar' in r.now));
+  ok('the marks are real and attributed', r.now.Jan.paid === true && r.now.Jan.by === 'admin:secret');
+  ok('the vendor figures are untouched', b.props['rev_atm_2026'] === JSON.stringify(figures));
+
+  const named = backend({ 'rev_atm_2025': JSON.stringify({ Jan: { Bend: { 'ATM 1': 5 } }, Jun: { Bend: { 'ATM 1': 5 } } }) });
+  const rn = named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan, Jun' });
+  ok('an explicit list works and is trimmed', rn.marked.join(',') === 'Jan,Jun');
+  ok('a bad month name is refused as a batch, marking nothing',
+     named.ctx.adminAtmPaid_({ year: '2025', months: 'Jan,Jly' }).error === 'invalid month(s): Jly');
+  ok('a bad year is refused', named.ctx.adminAtmPaid_({ year: '25', months: 'all' }).ok === false);
+  ok('no months is refused rather than meaning all',
+     named.ctx.adminAtmPaid_({ year: '2025' }).error === 'months= is required (comma-separated, or all)');
+  ok('it can UN-mark too, and then the reported gate does not apply',
+     named.ctx.adminAtmPaid_({ year: '2025', months: 'all', paid: '0' }).marked.length === 12);
+  ok('...leaving no residue', JSON.stringify(named.ctx.getAtmPaidData_('2025')) === '{}');
+  ok('the route is behind the deploy secret, in the block that already gates admin writes',
+     /params\.action === 'admin_atm_paid'\)/.test(GS)
+     && /if \(!secret \|\| params\.secret !== secret\) return jsonOut_\(\{ ok: false, error: 'Forbidden' \}\);\n    if \(params\.action === 'admin_atm_paid'\)/.test(GS));
+  ok('and it is NOT reachable with a session token', !/action === 'admin_atm_paid'\)\s*\{ const g = writeGuard_/.test(GS));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

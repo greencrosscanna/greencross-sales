@@ -936,6 +936,23 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
 .rev-block-meta{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;margin-top:-6px}
 .rev-atm-rate{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;flex:1;padding-left:8px}
 .rev-year-tabs{display:flex;gap:4px}
+/* ── ATM payment state ─────────────────────────────────────────────────────
+   Reported and paid are two different facts about a month, and until v2.613 the tab only ever
+   showed the first. The chip states the second for the selected month; the pill markers state it
+   for the whole year, which is the view the question is really asked in. */
+.rev-paid-chip{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:3px 9px;border-radius:999px;cursor:pointer;background:transparent;font-family:inherit}
+.rev-paid-chip.is-paid{border:1px solid rgba(74,222,128,.35);color:var(--green);background:rgba(74,222,128,.07)}
+.rev-paid-chip.is-owed{border:1px solid rgba(234,179,8,.35);color:var(--amber);background:rgba(234,179,8,.07)}
+.rev-paid-chip:disabled{opacity:.6;cursor:default}
+.rev-paid-err{display:none;font-size:12px;color:var(--red);margin:0 0 10px}
+.rev-owed{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--amber);background:rgba(234,179,8,.06);border:1px solid rgba(234,179,8,.22);border-radius:8px;padding:8px 10px;margin-bottom:14px}
+.rev-owed strong{font-weight:700;color:var(--amber)}
+.rev-owed-dot{width:7px;height:7px;border-radius:50%;background:var(--amber);flex:none}
+.rev-owed-amt{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+/* The marker is an underline rather than a dot so it survives the `.on` state's own background,
+   which a background-color marker would be hidden by on the selected month. */
+.rev-mo-btn.rev-mo-paid{box-shadow:inset 0 -2px 0 var(--green)}
+.rev-mo-btn.rev-mo-owed{box-shadow:inset 0 -2px 0 var(--amber)}
 .rev-store{margin-bottom:16px}
 .rev-store-head{display:flex;align-items:baseline;gap:12px;padding:6px 0;border-bottom:1px solid var(--border)}
 .rev-store-name{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);flex:1}
@@ -1443,7 +1460,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.612';
+const APP_VERSION = 'v2.613';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -6839,7 +6856,11 @@ let _revDetailLoading = null;   // year in flight, so a stale-year re-render can
 async function loadRevenueDetail() {
   const year = revYear();
   if (_revDetailLoading === year) return;
-  const cacheKey = `rev_detail_${year}`;
+  /* `rev_detail_v2_`, not `rev_detail_`: an entry written by the version before this one carries
+     no `paid` map, and an absent `paid` reads as NOTHING PAID — every reported month would come
+     back flagged as awaiting payment for up to an hour. Bumping the key orphans those entries
+     rather than letting one be trusted as complete. Same reason as `inv_gm3_`. */
+  const cacheKey = `rev_detail_v2_${year}`;
   const cached = readCache(cacheKey);
   // The year is checked even though it is part of the key. renderRevenue calls this whenever what
   // it holds is the wrong year, so a cache entry that disagreed with its own key would hand back
@@ -6870,6 +6891,51 @@ async function loadRevenueDetail() {
   }
 }
 
+// The month vocabulary the Revenue tab and the backend's MONTHS_12_ share. One list, because
+// the paid map is keyed by these exact strings on both sides.
+const REV_MONTHS_ = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/* WHAT AN ATM MONTH'S FIGURES MEAN, AND WHAT THEY DELIBERATELY DO NOT.
+ *
+ * Sky enters a month's transaction counts when the VENDOR'S REPORT arrives; the payment follows
+ * three or more weeks later. So a populated month says "reported", and nothing on this tab used
+ * to say anything about the money. On 2026-09-21 July's payment landing is what made him ask
+ * where August's was — the app held every figure and could not have told him.
+ *
+ * `paid` is a map of month -> {paid:true,...} kept per year by the backend, beside the figures
+ * rather than inside them: one payment covers the month, so it belongs to neither a store nor a
+ * machine. A month with no entry is unpaid, because unpaid is the ABSENCE of a mark.
+ */
+function atmMonthRev_(month) {
+  const { cfg, atm } = revenueDetail || {};
+  const machines = cfg?.machines || {};
+  const rate = Number(cfg?.atm_rate) || 1.75;
+  let txns = 0;
+  STORES.forEach(({ name: store }) => {
+    const storeData = atm?.[month]?.[store] || {};
+    (machines[store] || []).forEach(m => { txns += Number(storeData[m] || 0); });
+  });
+  return Math.round(txns * rate * 100) / 100;
+}
+
+function atmMonthPaid_(month) { return !!(revenueDetail?.paid?.[month]?.paid); }
+
+/* A MONTH WITH NO FIGURES IS NOT OUTSTANDING — IT IS UNREPORTED, WHICH IS A DIFFERENT QUESTION.
+ *
+ * Listing every unpaid month would name all twelve in January and read as twelve missing
+ * payments. What is owed is what has been reported and not yet paid, so revenue > 0 is the gate.
+ * A month that was reported as genuinely zero is indistinguishable from an unreported one in this
+ * data and is therefore left out; a zero month owes nothing either way.
+ */
+function atmOutstanding_() {
+  const out = [];
+  REV_MONTHS_.forEach(m => {
+    const rev = atmMonthRev_(m);
+    if (rev > 0 && !atmMonthPaid_(m)) out.push({ month: m, rev });
+  });
+  return out;
+}
+
 function renderRevenue() {
   const mc = document.getElementById('main-content');
   const year = revYear();
@@ -6886,13 +6952,21 @@ function renderRevenue() {
   const subletCats  = cfg?.sublet_cats || {};
 
   // Month pills — the month comes from the SHARED selection, same as the year above it.
-  const moNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const moNames = REV_MONTHS_;
   const activeMo = revMonthNum();
   const month    = moNames[activeMo - 1];
+  /* The pills carry the payment state for the WHOLE YEAR, which is the view the question is
+   * actually asked in: "which months am I still owed for" is not answerable one month at a time,
+   * and stepping twelve pills to find out is how August went unnoticed. A month with no figures
+   * gets no marker — unreported and unpaid are different, and marking both would light up the
+   * rest of the year. */
   const moNav = moNames.map((m, i) => {
     const mo = i + 1;
     const on = mo === activeMo ? ' on' : '';
-    return `<button class="rev-mo-btn${on}" onclick="setRevMonth(${mo})">${m}</button>`;
+    const rev = atmMonthRev_(m);
+    const mark = rev <= 0 ? '' : (atmMonthPaid_(m) ? ' rev-mo-paid' : ' rev-mo-owed');
+    const tip = rev <= 0 ? '' : (atmMonthPaid_(m) ? ` title="ATM paid"` : ` title="ATM reported, payment outstanding"`);
+    return `<button class="rev-mo-btn${on}${mark}"${tip} onclick="setRevMonth(${mo})">${m}</button>`;
   }).join('');
 
   // ── ATM block ────────────────────────────────────────────────
@@ -6972,6 +7046,30 @@ function renderRevenue() {
   }
   const subTotalDisplay = subGrandTotal > 0 ? `$${subGrandTotal.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}` : '—';
 
+  /* THE CHIP QUALIFIES THE FIGURE ABOVE IT AND IS THE ONLY WAY TO CHANGE THE STATE.
+   *
+   * It says nothing when the month has no figures: there is no payment to be owed, and an amber
+   * "awaiting payment" over an empty month is the $0-hero error again - a confident statement
+   * about a question nobody has answered yet. */
+  const monthPaid = atmMonthPaid_(month);
+  const atmPaidChip = atmGrandRev <= 0 ? '' : (monthPaid
+    ? `<button class="rev-paid-chip is-paid" onclick="toggleAtmPaid('${month}', false)" title="Mark as not yet paid">Paid</button>`
+    : `<button class="rev-paid-chip is-owed" onclick="toggleAtmPaid('${month}', true)" title="Mark this month's payment as received">Awaiting payment</button>`);
+
+  /* AND THE YEAR-WIDE LINE IS THE ONE THAT WOULD HAVE CAUGHT AUGUST.
+   *
+   * Shown on every month, not just an unpaid one, because the month you are standing in is not
+   * the month you have forgotten. It names the months and totals them; the current month is not
+   * excluded - a report is only entered once it arrives, so a reported month is owed whatever the
+   * calendar says. */
+  const owed = atmOutstanding_();
+  const owedTotal = owed.reduce((t, o) => t + o.rev, 0);
+  const atmOwedLine = !owed.length ? '' : `<div class="rev-owed">
+      <span class="rev-owed-dot"></span>
+      <span>Awaiting payment: <strong>${owed.map(o => o.month).join(', ')}</strong> ${year}</span>
+      <span class="rev-owed-amt">$${owedTotal.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+    </div>`;
+
   mc.innerHTML = `<div class="rev-wrap">
     <div class="rev-head">
       <span class="rev-title">Additional Revenue</span>
@@ -6989,7 +7087,10 @@ function renderRevenue() {
       </div>
       <div class="rev-block-meta">
         <span style="opacity:.5;font-size:.72rem">${atmGrandTxns > 0 ? atmGrandTxns.toLocaleString('en-US') + ' total transactions' : ''}</span>
+        ${atmPaidChip}
       </div>
+      <div id="rev-paid-err" class="rev-paid-err"></div>
+      ${atmOwedLine}
       ${atmStoreHtml}
     </div>
 
@@ -7019,6 +7120,44 @@ function revYearChoices() {
 // then opening Income showed the previous month's sales under the new month's header.
 function setRevYear(yr)  { if (yr !== revYear()) periodApply({ year: yr, month: revMonthNum() }); }
 function setRevMonth(mo) { periodApply({ year: revYear(), month: mo }); }
+
+/* MARKING A MONTH PAID IS A WRITE, SO IT GETS EXACTLY ONE ATTEMPT.
+ *
+ * `WRITE_CAPS_` is a one-element ladder on purpose: an abandoned request keeps running on Apps
+ * Script, so a retried write is a SECOND write and the client cannot tell a timeout from a
+ * success. Bounded, then reported - never re-sent.
+ *
+ * The local state is updated from the RESULT rather than from what was asked, so a refusal (a
+ * viewer hits the fail-closed write guard and gets `read_only`) cannot leave the chip claiming a
+ * mark the backend does not hold. The cache is rewritten with it for the same reason: the tab
+ * would otherwise re-read an hour-old `paid` map on the next visit and contradict itself.
+ */
+async function toggleAtmPaid(month, paid) {
+  const year = revYear();
+  const btn = document.querySelector('.rev-paid-chip');
+  const prevLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const proxyUrl = getProxyUrl();
+    const url = `${proxyUrl}?action=set_atm_paid&token=${encodeURIComponent(getToken())}`
+              + `&year=${year}&month=${month}&paid=${paid ? 1 : 0}`;
+    const data = await gasFetchJson(url, null, WRITE_CAPS_);   // one attempt — never re-send a write
+    if (!data.ok) throw new Error(data.code === 'read_only' ? 'Read-only access — cannot change this.'
+                                                           : (data.error || 'Save failed'));
+    if (!revenueDetail.paid) revenueDetail.paid = {};
+    revenueDetail.paid = data.data || {};
+    writeCache('rev_detail_v2_' + year, revenueDetail, 3600000);
+    renderRevenue();
+  } catch (e) {
+    // The figures are untouched by a failed mark, so the tab stays usable and says what happened
+    // rather than re-rendering a state the backend did not accept.
+    if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
+    // In the block the reader is looking at, NOT in the Settings drawer: showErr's targets live
+    // in that panel, so a failure reported there is a failure nobody sees.
+    const errEl = document.getElementById('rev-paid-err');
+    if (errEl) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+  }
+}
 
 let _revEdit = {};
 function openRevModal(type, store, item, month, year) {
@@ -7058,7 +7197,7 @@ async function saveRevModal() {
     if (!revenueDetail[block][month])        revenueDetail[block][month]       = {};
     if (!revenueDetail[block][month][store]) revenueDetail[block][month][store] = {};
     revenueDetail[block][month][store][item] = value;
-    writeCache('rev_detail_' + year, revenueDetail, 3600000);
+    writeCache('rev_detail_v2_' + year, revenueDetail, 3600000);
     closeOtherRevModal();
     renderRevenue();
   } catch(e) {

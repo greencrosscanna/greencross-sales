@@ -1402,6 +1402,7 @@ function doGet(e) {
   if (params.action === 'set_otherrev')   { const g = writeGuard_(auth.user, 'set_otherrev'); if (!g.ok) return jsonOut_(g); return setOtherRevenue(params); }
   if (params.action === 'revenue_detail') return getRevenueDetail(params);
   if (params.action === 'set_revenue')    { const g = writeGuard_(auth.user, 'set_revenue'); if (!g.ok) return jsonOut_(g); return setRevenueLine(params); }
+  if (params.action === 'set_atm_paid')    { const g = writeGuard_(auth.user, 'set_atm_paid'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return setAtmPaid_(params); }
   if (params.action === 'budget_proposal') return getBudgetProposal(params);
   if (params.action === 'apply_budget')    { const g = writeGuard_(auth.user, 'apply_budget'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return applyBudget_(params); }
   if (params.action === 'clear_budget')    { const g = writeGuard_(auth.user, 'clear_budget'); if (!g.ok) return jsonOut_(g); return clearBudget_(params); }
@@ -4490,7 +4491,7 @@ function getRevenueDetail(params) {
     // it. A year with no stored data now returns empty rather than silently reaching for a
     // spreadsheet this app can no longer open.
 
-    return jsonOut_({ ok: true, year, cfg, atm, sub });
+    return jsonOut_({ ok: true, year, cfg, atm, sub, paid: getAtmPaidData_(year) });
   } catch(e) {
     return jsonOut_({ ok: false, error: errText_(e) });
   }
@@ -4505,6 +4506,52 @@ function clearAtmCache_(params, user) {
   PropertiesService.getScriptProperties().deleteProperty('rev_atm_' + year);
   cacheDelete_('otherrev');
   return jsonOut_({ ok: true, cleared: 'rev_atm_' + year });
+}
+
+/* AN ATM MONTH'S NUMBERS ARE THE VENDOR'S REPORT, NOT THE MONEY.
+ *
+ * The vendor reports a month's transactions and the payment follows three or more weeks later, so
+ * a populated month means "reported", never "paid". Without somewhere to record the difference the
+ * only record of an unpaid month is Sky remembering it — and on 2026-09-21 July's payment arriving
+ * is what prompted him to ask where August's was. The app had every figure and could not have
+ * told him.
+ *
+ * Stored per YEAR, keyed by month, beside the figures it qualifies (`rev_atm_<year>`) rather than
+ * inside them: a paid mark is a fact about the payment, and folding it into the per-machine map
+ * would put it under a store and a machine, where it does not belong — one payment covers the
+ * month. `setRevenueLine` rewrites `data[month][store][item]` and would blank a sibling flag.
+ *
+ * `at` and `by` are recorded because "when did we mark this" is the first question asked of a flag
+ * nobody can explain, and they cost nothing. They are NOT the payment date — Sky's call: the mark
+ * is a toggle, so the app must not print a marked-on date where a received-on date would be read.
+ */
+function atmPaidProp_(year) { return 'rev_atmpaid_' + year; }
+
+function getAtmPaidData_(year) {
+  const raw = PropertiesService.getScriptProperties().getProperty(atmPaidProp_(year));
+  if (!raw) return {};
+  try { return JSON.parse(raw) || {}; } catch (e) { return {}; }   // a corrupt flag must not cost the figures
+}
+
+function setAtmPaid_(params) {
+  const year  = String(params.year || '');
+  const month = params.month;
+  // Deliberately strict rather than truthy: `paid=false` and `paid=0` arrive as STRINGS in a query
+  // string, and 'false' is truthy. Anything else is a caller bug and is refused rather than guessed.
+  const raw   = String(params.paid == null ? '' : params.paid).toLowerCase();
+  if (!/^[0-9]{4}$/.test(year))       return jsonOut_({ ok: false, error: 'invalid year' });
+  if (!MONTHS_12_.includes(month))    return jsonOut_({ ok: false, error: 'invalid month' });
+  if (!['1','0','true','false'].includes(raw)) return jsonOut_({ ok: false, error: 'invalid paid' });
+  const paid = (raw === '1' || raw === 'true');
+  try {
+    const data = getAtmPaidData_(year);
+    if (paid) data[month] = { paid: true, at: new Date().toISOString(), by: params._user || '' };
+    else      delete data[month];   // unpaid is the ABSENCE of a mark, so un-marking leaves no residue
+    PropertiesService.getScriptProperties().setProperty(atmPaidProp_(year), JSON.stringify(data));
+    return jsonOut_({ ok: true, year, month, paid, data });
+  } catch (e) {
+    return jsonOut_({ ok: false, error: errText_(e) });
+  }
 }
 
 function setRevenueLine(params) {

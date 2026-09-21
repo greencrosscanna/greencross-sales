@@ -46,6 +46,9 @@ const WRITES = new Set([
   // The bills-once flag is written from the budget planner and READ by the Expenses tab to decide
   // whether to pace a category. It mutates a script property, so it is a write like any other.
   'set_bills_once',
+  // Marking an ATM month's vendor payment as received. Writes a script property, is
+  // write-guarded in the proxy, and must never be armed by default on localhost.
+  'set_atm_paid',
 ]);
 
 // ── Every action the page can request ─────────────────────────────────────────────────────────

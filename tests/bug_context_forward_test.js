@@ -147,6 +147,27 @@ console.log('\n── a top-level tab still wins if one ever arrives ──');
   ok('the snapshot wins over appTab when both set', s.payload.tab === 'expenses');
 }
 
+console.log('\n── "Details" is OPTIONAL on the shared form — a title alone must file ──');
+{
+  /* Sky, 2026-09-28: "Still hasn't loaded after 5+ minutes waiting", details left blank as the form
+     allows, answered "desc required". The form requires the title, not the description. */
+  const s = run(sharedFormPayload({ title: "Still hasn't loaded after 5+ minutes waiting", desc: '' }));
+  ok('a title with no details FILES',              s.out && s.out.ok === true);
+  ok('  …and reaches Core',                        !!s.payload);
+  ok('  …with the title as typed',                 s.payload && s.payload.title === "Still hasn't loaded after 5+ minutes waiting");
+  ok('  …and desc "" not undefined',               s.payload && s.payload.desc === '');
+}
+{
+  const p = sharedFormPayload({ title: 'only a title' }); delete p.desc;
+  const s = run(p);
+  ok('a payload with no desc key at all files',    s.out && s.out.ok === true);
+}
+{
+  const s = run(sharedFormPayload({ title: '   ', desc: '  ' }));
+  ok('whitespace in both fields is refused',       s.out && s.out.ok === false && s.payload === null);
+  ok('  …and the refusal does not say "desc"',     !/desc/.test(s.out.error));
+}
+
 console.log('\n── the refusals that were already load-bearing ──');
 {
   const p = sharedFormPayload({ desc: '' }); delete p.title;

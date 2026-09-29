@@ -4653,12 +4653,18 @@ function adminAtmPaid_(params) {
 function reportBug_(params, reporter) {
   try {
     const priority = params.priority || 'medium';
-    const desc     = params.desc     || '';
-    if (!desc) return jsonOut_({ ok: false, error: 'desc required' });
-    // GX Core requires a title; the Sales form collects only a description, so derive one from its first
-    // line. Without this, the pinned GXCore library rejected the report ("title required") and the old code
-    // ignored that result — returning ok:true, so the report was silently lost while the user saw success.
+    const desc     = String(params.desc || '').trim();
+    /* THE TITLE IS THE REQUIRED FIELD, NOT THE DESCRIPTION. The shared form (gx-bugreport.js) asks
+       "What went wrong" (→ title, required) and "Details (optional)" (→ desc). This gate still
+       demanded `desc`, so a report filled in exactly as the form asks was refused with the bare
+       "desc required" — Sky, 2026-09-28, filing "Still hasn't loaded after 5+ minutes waiting" from
+       a phone. The bug reporter refusing a valid bug is the one failure nobody can report. Refuse
+       only a report with NEITHER field. */
+    // GX Core requires a title; an older caller may send only a description, so derive one from its
+    // first line. Without this, the pinned GXCore library rejected the report ("title required") and the
+    // old code ignored that result — returning ok:true, so the report was silently lost.
     const title = (params.title && String(params.title).trim()) || desc.split('\n')[0].slice(0, 80).trim();
+    if (!title) return jsonOut_({ ok: false, error: 'Please say what went wrong.' });
 
     /* FORWARD `context`, AND READ `tab` OUT OF IT.
      *

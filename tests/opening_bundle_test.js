@@ -369,12 +369,18 @@ function clientCtx(extra = {}) {
     AUX_READ_CAPS_: [12000, 25000], GAS_PRIO: { SCREEN: 0 },
     salesLogout: () => {},
     periodGoalsCache: {}, paceFracs: null, paceFracsAt: 0,
+    /* The Cloudflare shortcut. Absent unless a test supplies one, and an absent `fetch` is exactly
+     * the "cache unreachable" case — so every assertion below it still measures the /exec path this
+     * file exists to pin down. A test that wants the cache overrides `fetch`. */
+    setTimeout, clearTimeout, AbortController,
   }, extra);
   vm.createContext(ctx);
   vm.runInContext([
     constFrom(HTML, 'LIVE_SNAPSHOT_MAXAGE_S'), constFrom(HTML, 'OPEN_BUNDLE_LS_'),
     html('bundleIsErrorPayload_'), html('bundleFitsView_'), html('bundlePartData_'),
-    html('bundleStorePreset_'), html('fetchOpenBundle_'), html('applyBundleDayParts_'),
+    html('bundleStorePreset_'), html('fetchCachedBundle_'), html('fetchOpenBundle_'),
+    html('applyBundleDayParts_'),
+    constFrom(HTML, 'BUNDLE_CACHE_URL'), constFrom(HTML, 'BUNDLE_CACHE_TIMEOUT_MS'),
   ].join('\n'), ctx);
   ctx._ls = ls;
   return ctx;
@@ -497,6 +503,7 @@ function clientCtx(extra = {}) {
       const ctx = {
         console: { log() {}, warn() {}, error() {} }, JSON, Math, Object, Array, String, Number, Promise, Set, Date, Error, URL, encodeURIComponent,
         setTimeout: (fn) => { settle.push(fn); fn(); return 0; }, clearTimeout: () => {},
+        AbortController: function () { this.signal = null; this.abort = () => {}; },
         window: { scrollY: 0, addEventListener() {}, removeEventListener() {}, scrollTo() {} },
         document: { getElementById: el },
         localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
@@ -528,6 +535,12 @@ function clientCtx(extra = {}) {
       vm.runInContext([
         constFrom(HTML, 'LIVE_SNAPSHOT_MAXAGE_S'), constFrom(HTML, 'OPEN_BUNDLE_LS_'),
         html('bundleIsErrorPayload_'), html('bundleFitsView_'), html('bundlePartData_'), html('bundleStorePreset_'),
+        /* The Cloudflare shortcut is loaded but has no `fetch` in this sandbox, so it returns null
+         * and every count below measures the /exec path — which is the path this section exists to
+         * pin down, and the one that still runs whenever the cache is unreachable. Section 14
+         * supplies a `fetch` and asserts the other half. */
+        constFrom(HTML, 'BUNDLE_CACHE_URL'), constFrom(HTML, 'BUNDLE_CACHE_TIMEOUT_MS'),
+        html('fetchCachedBundle_'),
         html('fetchOpenBundle_'), html('applyBundleDayParts_'),
         html('fetchStoresMeta'), html('loadGoals'), html('loadPeriodGoalRange'), html('loadOtherRevenue'),
         html('round2_'), html('mergeStorePhases_'), html('loadAllStores'),
@@ -565,6 +578,42 @@ function clientCtx(extra = {}) {
     await refresh.ctx.loadAllStores();
     ok('a REFRESH never asks for the snapshot — a person who asked for new numbers gets new numbers',
        !refresh.reqs.includes('bundle') && refresh.reqs.filter(a => a === 'store:live').length === 6);
+
+    /* THE CLOUDFLARE SHORTCUT REPLACES THE /exec CALL — it does not sit in front of it.
+     *
+     * The whole point is that a person never waits on the hop, so "the cache answered AND we asked
+     * Google anyway" would be the change doing nothing while looking like it worked. Nothing else
+     * in this file would catch that: the screen fills either way. */
+    const served = liveSnap();
+    const cacheHit = loadCtx({ bundleAnswer: new Error('/exec must not be called') });
+    cacheHit.ctx.fetch = async () => ({
+      ok: true, json: async () => JSON.parse(JSON.stringify(served)),
+    });
+    await cacheHit.ctx.loadAllStores();
+    ok('the cache answering means ZERO requests to this app', cacheHit.reqs.length === 0);
+    eq('...and all six stores are on screen from it', Object.keys(cacheHit.ctx.liveData).sort(), SIX.slice().sort());
+
+    /* And the reverse: an unreachable cache must be invisible, not fatal. */
+    const cacheDown = loadCtx({ bundleAnswer: liveSnap() });
+    cacheDown.ctx.fetch = async () => { throw new Error('cloudflare unreachable'); };
+    await cacheDown.ctx.loadAllStores();
+    eq('a dead cache falls straight through to /exec', cacheDown.reqs, ['bundle']);
+    eq('...and the six stores still land', Object.keys(cacheDown.ctx.liveData).length, 6);
+
+    /* A STALE copy is refused by the client, not merely flagged by the Worker. An hour-old cashflow
+     * figure painted as current is a wrong number on a screen somebody makes decisions from. */
+    const cacheStale = loadCtx({ bundleAnswer: liveSnap() });
+    cacheStale.ctx.fetch = async () => ({
+      ok: true, json: async () => Object.assign(JSON.parse(JSON.stringify(served)), { cache_stale: true }),
+    });
+    await cacheStale.ctx.loadAllStores();
+    eq('a stale cached copy is dropped and the hop is paid for a real number', cacheStale.reqs, ['bundle']);
+
+    /* An ok:false body with HTTP 200 is the shape a half-working edge returns. It is not data. */
+    const cacheJunk = loadCtx({ bundleAnswer: liveSnap() });
+    cacheJunk.ctx.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error: 'bundle_missing' }) });
+    await cacheJunk.ctx.loadAllStores();
+    eq('an ok:false cache body is not treated as a snapshot', cacheJunk.reqs, ['bundle']);
   }
 
   console.log('\n14. the saved copy says it is one');

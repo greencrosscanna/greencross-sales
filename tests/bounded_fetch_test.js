@@ -148,15 +148,24 @@ const SECTION_1 = () => section('1. EVERY fetch IN index.html PASSES AN AbortSig
          '\n       or give it its own AbortController if it must stay outside the pool.'
        : '');
 
-  /* The four that legitimately hold a raw fetch, named so the count is a DECISION rather than
+  /* The five that legitimately hold a raw fetch, named so the count is a DECISION rather than
      whatever the file happens to contain: gasFetchJson itself; the cogs_dutchie call that arms its
      own ceiling inside a lane; the login prewarm, outside the pool because a request nobody waits
-     for must not queue ahead of the sign-in behind it; and the session heartbeat, which
-     aux_hang_bounds_test pins as un-retried because its ten-minute interval IS its retry.
-     The last one was briefly converted and that test caught it — a rule this file cannot see on its
-     own, which is the argument for both files existing. */
-  ok('exactly four raw fetch sites, the ones this file knows about',
-     sites.length === 4, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
+     for must not queue ahead of the sign-in behind it; the session heartbeat, which
+     aux_hang_bounds_test pins as un-retried because its ten-minute interval IS its retry;
+     and fetchCachedBundle_ (added 2026-09-30, v2.617).
+     The heartbeat was briefly converted and that test caught it — a rule this file cannot see on
+     its own, which is the argument for both files existing.
+
+     WHY fetchCachedBundle_ IS OUTSIDE THE POOL. gasFetchJson is the machinery for the two-hop
+     /exec: JSONP, a lane gate, and a retry ladder for a hop that stalls 30-70% of the time in a
+     degraded window. None of it applies to a Cloudflare endpoint that either answers in
+     milliseconds or is not there. Worse, putting it in the pool would make it QUEUE behind the
+     very /exec requests it exists to avoid — the shortcut waiting on the thing it replaces. It
+     carries its own AbortController and a single short ceiling, and every failure returns null so
+     the caller falls through to the pooled /exec path unchanged. */
+  ok('exactly five raw fetch sites, the ones this file knows about',
+     sites.length === 5, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
      ' — a new one is not necessarily wrong, but it is a decision, so say so here.');
 });
 

@@ -1,0 +1,7 @@
+node_modules/
+# Holds the KV namespace id, which is per-account config rather than source. Ship the .example.
+wrangler.toml
+.wrangler/
+.dev.vars
+# Wrangler caches an account id and a session here. Neither belongs in a shared repo.
+.cache/

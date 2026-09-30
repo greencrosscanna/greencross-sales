@@ -1460,7 +1460,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.616';
+const APP_VERSION = 'v2.617';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2249,6 +2249,21 @@ function getDOWWeights(storeNames) {
   return _dowWeightsCache;
 }
 const DEFAULT_PROXY = 'https://script.google.com/macros/s/AKfycbzju5HeWTGq_5uND_o6M-Gzdcy-lRQw7flOwzI013Me03SumhV8lYV_O_Z4-cIBn-lp/exec';
+
+/* The opening snapshot, served from Cloudflare instead of Apps Script (2026-09-30).
+ *
+ * WHY. /exec stalls on 30-70% of requests during degraded windows lasting hours — measured across
+ * every app in the suite on 09-25, and at 31% on this app at 09:35 on 09-30 with the same probe
+ * reading 0% at 11:15. The open is already ONE call (v2.611); the cost is the hop itself, which no
+ * amount of tuning in this file can reach. A Worker pulls the same ?action=bundle every 5 minutes
+ * and serves the result, so the open never touches Google.
+ *
+ * IT IS A SHORTCUT, NOT A DEPENDENCY. fetchOpenBundle_ tries this first with a short ceiling and
+ * falls through to the /exec path on ANY failure — down, 401, empty, slow. The worst case is the
+ * behavior this app already had, which is why it can ship without a flag. */
+const BUNDLE_CACHE_URL = 'https://gx-sales-cache.greencross.workers.dev/bundle';
+const BUNDLE_CACHE_TIMEOUT_MS = 4000;
+
 const DAY_LETTERS = ['S','M','T','W','T','F','S'];
 
 // ── App-wide constants ────────────────────────────────────────────────────────
@@ -3292,9 +3307,52 @@ function bundleStorePreset_(b, name) {
   return { settled: e.settled, live: live };
 }
 
+/* The Cloudflare copy of the snapshot. Returns null on ANYTHING other than a clean answer, so every
+ * caller falls through to /exec unchanged — this can only make an open faster, never break one.
+ * Deliberately NOT routed through gasFetchJson: that is the JSONP + retry-ladder machinery built for
+ * the two-hop /exec, and none of it applies to a normal CORS endpoint that either answers in
+ * milliseconds or is not there. */
+async function fetchCachedBundle_() {
+  if (!BUNDLE_CACHE_URL) return null;
+  const token = getToken();
+  if (!token) return null;
+  /* EVERYTHING is inside the try, including building the AbortController and the timer. A browser
+   * missing either would otherwise throw before the catch exists and take the whole open down —
+   * turning an optional accelerator into a hard dependency, which is exactly what it must not be. */
+  let timer = null;
+  try {
+    const ctl = new AbortController();
+    timer = setTimeout(() => ctl.abort(), BUNDLE_CACHE_TIMEOUT_MS);
+    const r = await fetch(BUNDLE_CACHE_URL, {
+      signal: ctl.signal,
+      headers: { authorization: 'Bearer ' + token },
+    });
+    if (!r.ok) return null;
+    const b = await r.json();
+    if (!b || !b.ok) return null;
+    /* A stale copy is NOT used. The Worker flags anything older than an hour, and an hour-old
+     * cashflow figure is a wrong number — fall through and pay the hop for a real one. */
+    if (b.cache_stale) return null;
+    return b;
+  } catch (e) {
+    return null;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 async function fetchOpenBundle_() {
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return null;
+
+  const cached = await fetchCachedBundle_();
+  if (cached && bundleFitsView_(cached)) {
+    if (!bundleIsErrorPayload_(cached)) {
+      try { localStorage.setItem(OPEN_BUNDLE_LS_, JSON.stringify(cached)); } catch (e) {}
+    }
+    return cached;
+  }
+
   try {
     const b = await gasFetchJson(`${proxyUrl}?action=bundle&token=${encodeURIComponent(getToken())}`,
                                  null, AUX_READ_CAPS_, GAS_PRIO.SCREEN);

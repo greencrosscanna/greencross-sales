@@ -1,0 +1,26 @@
+# Copy to wrangler.toml and fill in the KV id. The real file is gitignored — not because the id is
+# a secret (it is an identifier, useless without an API token) but because it is 32 hex characters,
+# which is the exact shape gx-preflight scans for as a leaked Dutchie POS key. The scanner cannot
+# tell the two apart and should not try: a config file holding a per-account id is not source.
+#
+# Set up from scratch:
+#   cp wrangler.toml.example wrangler.toml
+#   npx wrangler kv namespace create GX        # paste the printed id below
+#   npx wrangler secret put GX_DEPLOY_SECRET < ../.gx_deploy_secret
+#   npx wrangler deploy
+
+name = "gx-sales-cache"
+main = "src/index.js"
+compatibility_date = "2026-09-30"
+
+# Every 5 minutes — the cadence the Apps Script trigger rebuilds the bundle on. Asking faster than
+# the source changes buys nothing and spends free-tier requests.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "GX"
+id = "PASTE_THE_ID_FROM_kv_namespace_create"
+
+# GX_DEPLOY_SECRET is NOT in this file on purpose — it is set out of band with `wrangler secret put`
+# and lives in Cloudflare's encrypted store, never on disk.

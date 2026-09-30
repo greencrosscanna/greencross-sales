@@ -1,0 +1,15 @@
+{
+  "name": "gx-sales-cache",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker that serves the Sales opening snapshot so nobody waits on the Apps Script /exec hop.",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

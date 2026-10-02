@@ -98,13 +98,55 @@ async function serviceToken(env, force, trace) {
  * `Ok`, and cached nothing for 20 minutes — the handler had not thrown, so nothing anywhere said
  * otherwise. A scheduled job that fails silently is worse than one that never runs: it looks
  * healthy on every dashboard that exists. /health reads this back. */
+/* WRITES ARE THE SCARCE RESOURCE, NOT READS. Workers KV free tier allows 1,000 writes a day against
+ * 100,000 reads. The first version of this Worker wrote twice per tick — the snapshot and this
+ * record — which is 576 a day on a 5-minute cron, and Cloudflare emailed Sky at 50% on 2026-10-02.
+ * Hitting the cap does not fail loudly: `put` starts returning errors, the cache quietly stops
+ * refreshing, and it degrades to serving stale and then refusing — the cache silently ceasing to be
+ * a cache, which is the failure mode this file already has one scar from.
+ *
+ * So this records only when the outcome CHANGES, plus every failure. A healthy run that follows a
+ * healthy run says nothing new and costs nothing; /health still reports the last run because the
+ * stored record is still the last one that MATTERED. */
 async function record(env, result) {
+  try {
+    const prev = await env.GX.get(KV_LAST_RUN, 'json');
+    const sameOutcome = prev && prev.ok === result.ok && prev.error === result.error;
+    /* Refresh a stale-looking record once an hour even when nothing changed, so a long run of
+       successes does not leave /health reporting an ancient timestamp that reads as a stuck job. */
+    const fresh = prev && (Date.now() - prev.at) < 3600000;
+    if (sameOutcome && fresh) return result;
+  } catch (e) { /* fall through and write — a read failure must not lose a failure record */ }
   try { await env.GX.put(KV_LAST_RUN, JSON.stringify({ ...result, at: Date.now() })); } catch (e) {}
   return result;
 }
 
-async function refresh(env) {
+/* Store hours, Los Angeles — the same window Sales' own trigger uses (08:00-22:15 PT), and for the
+ * same reason: outside it nothing moves, so re-pulling every five minutes spends the write budget on
+ * re-writing an identical snapshot. Computed from the UTC offset rather than a library, and
+ * deliberately generous at both ends: being an hour wrong costs one extra pull, while being wrong
+ * the other way would serve a stale morning. */
+function inStoreHoursLA(now) {
+  const la = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const h = la.getHours() + la.getMinutes() / 60;
+  return h >= 7.5 && h < 22.5;
+}
+const OFFHOURS_MIN_AGE_MS = 55 * 60 * 1000;
+
+async function refresh(env, force) {
   const trace = [];
+
+  /* Outside store hours, refresh about hourly instead of every five minutes. Skipping costs one KV
+     READ, which is the plentiful one. */
+  if (!force && !inStoreHoursLA(new Date())) {
+    try {
+      const held = await env.GX.get(KV_BUNDLE, 'json');
+      if (held && (Date.now() - held.fetched_at) < OFFHOURS_MIN_AGE_MS) {
+        return { ok: true, skipped: 'offhours' };   // not recorded: nothing happened
+      }
+    } catch (e) { /* fall through and refresh */ }
+  }
+
   let token = await serviceToken(env, false, trace);
   if (!token) return record(env, { ok: false, error: 'no_session', trace });
 
@@ -112,8 +154,21 @@ async function refresh(env) {
     for (const ms of CRON_TIMEOUTS_MS) {
       const r = await fetchJson(`${SALES_EXEC}?action=bundle&token=${encodeURIComponent(token)}`, ms);
       if (r && r.ok) {
-        await env.GX.put(KV_BUNDLE, JSON.stringify({ fetched_at: Date.now(), payload: r }));
-        return record(env, { ok: true, bytes: JSON.stringify(r).length, trace });
+        const body = JSON.stringify(r);
+        /* AN UNCHANGED SNAPSHOT IS NOT WRITTEN. The source rebuilds on its own 5-minute trigger, so
+           a tick that lands between two rebuilds fetches a byte-identical payload — writing it back
+           spends the day's scarcest resource to store what is already stored. The stored
+           `fetched_at` deliberately does NOT move: it is when this content was true, and bumping it
+           on a no-op write would make a stalled upstream look perpetually fresh. */
+        let unchanged = false;
+        try {
+          const held = await env.GX.get(KV_BUNDLE, 'json');
+          unchanged = !!held && JSON.stringify(held.payload) === body;
+        } catch (e) { /* treat as changed and write */ }
+        if (!unchanged) {
+          await env.GX.put(KV_BUNDLE, JSON.stringify({ fetched_at: Date.now(), payload: r }));
+        }
+        return record(env, { ok: true, bytes: body.length, unchanged: unchanged, trace });
       }
       trace.push('bundle@' + ms + ':' + ((r && (r.error || r.code)) || 'unknown'));
       /* A 401 means the token died early (revoked, or Core rotated). Re-mint ONCE and retry the
@@ -208,7 +263,8 @@ export default {
       if (!env.GX_DEPLOY_SECRET || given !== env.GX_DEPLOY_SECRET) {
         return json({ ok: false, error: 'Forbidden' }, 403);
       }
-      return json(await refresh(env));
+      /* force: a human asking for a refresh means now, store hours or not. */
+      return json(await refresh(env, true));
     }
 
     if (url.pathname === '/bundle') {

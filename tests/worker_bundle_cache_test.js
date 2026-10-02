@@ -70,6 +70,17 @@ function scriptedFetch(answers) {
   return calls;
 }
 
+
+/* `scheduled` hands its work to ctx.waitUntil and returns IMMEDIATELY — awaiting the call itself
+ * resolves before the job has done anything, so assertions about what it wrote pass vacuously. The
+ * first version of section 11 did exactly that and reported three green "zero writes" checks
+ * against a job that had not run. Capture the promise and await THAT. */
+async function runScheduled(worker, env) {
+  let pending = null;
+  await worker.scheduled({}, env, { waitUntil: p => { pending = p; } });
+  if (pending) await pending;
+}
+
 async function main() {
   const mod = await import('file://' + WORKER);
   const worker = mod.default;
@@ -182,6 +193,58 @@ async function main() {
     scriptedFetch([{ body: '<!DOCTYPE html><title>Error</title>' }]);
     const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), { GX: kv, GX_DEPLOY_SECRET: 's' }, {});
     ok('an HTML error page is a refusal, not a crash and not a pass', res.status === 401);
+  }
+
+  /* ── 11. THE WRITE BUDGET — the scarce resource is writes, not reads ────────────────────────── */
+  {
+    /* Workers KV free tier: 1,000 writes a day against 100,000 reads. Two writes per tick on a
+     * 5-minute cron is 576/day, and Cloudflare emailed Sky at 50% on 2026-10-02 — one day in.
+     * Exceeding it does not fail loudly: `put` errors, the cache quietly stops refreshing, and it
+     * degrades to stale and then to refusing. A cache that silently stops caching is the exact
+     * failure this file already exists to catch one instance of. */
+    const BUNDLE = { ok: true, stores: [{ id: 'river-rd', net: 1234 }] };
+
+    // An identical payload must not be written back.
+    const kv = fakeKV({
+      'service_session': JSON.stringify({ token: 'svc', expires_ms: Date.now() + 7 * 86400000 }),
+      'bundle:v1': JSON.stringify({ fetched_at: Date.now() - 60000, payload: BUNDLE }),
+      'last_run': JSON.stringify({ ok: true, at: Date.now() - 60000 }),
+    });
+    scriptedFetch([{ body: BUNDLE }]);
+    await runScheduled(worker, { GX: kv, GX_DEPLOY_SECRET: 's' });
+    ok('an unchanged snapshot is not written back', !kv.writes.includes('bundle:v1'));
+    ok('...and an unchanged OUTCOME is not recorded either', !kv.writes.includes('last_run'));
+    ok('so a quiet tick costs ZERO writes', kv.writes.length === 0);
+  }
+
+  {
+    const BUNDLE = { ok: true, stores: [{ id: 'river-rd', net: 1234 }] };
+    const MOVED = { ok: true, stores: [{ id: 'river-rd', net: 9999 }] };
+    const kv = fakeKV({
+      'service_session': JSON.stringify({ token: 'svc', expires_ms: Date.now() + 7 * 86400000 }),
+      'bundle:v1': JSON.stringify({ fetched_at: Date.now() - 60000, payload: BUNDLE }),
+      'last_run': JSON.stringify({ ok: true, at: Date.now() - 60000 }),
+    });
+    scriptedFetch([{ body: MOVED }]);
+    await runScheduled(worker, { GX: kv, GX_DEPLOY_SECRET: 's' });
+    ok('a CHANGED snapshot is written', kv.writes.includes('bundle:v1'));
+  }
+
+  {
+    /* A failure is always recorded, even when the previous run also failed in some other way —
+     * losing the reason is how a silent job stays silent. */
+    const kv = fakeKV({
+      'service_session': JSON.stringify({ token: 'svc', expires_ms: Date.now() + 7 * 86400000 }),
+      'bundle:v1': JSON.stringify({ fetched_at: Date.now() - 60000, payload: { ok: true } }),
+      'last_run': JSON.stringify({ ok: true, at: Date.now() - 60000 }),
+    });
+    scriptedFetch(['timeout', 'timeout', 'timeout', 'timeout', 'timeout', 'timeout', 'timeout', 'timeout']);
+    await runScheduled(worker, { GX: kv, GX_DEPLOY_SECRET: 's' });
+    ok('a failing run IS recorded even though the last record was recent',
+      kv.writes.includes('last_run'));
+    const last = await kv.get('last_run', 'json');
+    ok('...and it says it failed', last && last.ok === false);
+    ok('a failed pull leaves the last good snapshot in place', !kv.writes.includes('bundle:v1'));
   }
 
   console.log(passed + ' assertions passed');

@@ -42,3 +42,10 @@ serve.js
 # directory when it is created costs one line; finding out the other way costs a deploy.
 tools/
 tools/**
+
+# Cloudflare Worker (v2.617, opening snapshot). It runs on Cloudflare, never in Apps Script, and its
+# node_modules is thousands of .js files. Same mechanism as every entry above: rootDir is "." and
+# nothing excludes JS by extension, so clasp pushed worker/node_modules/**/index.gs and the first
+# ES `export` was a parse error that blocked a library re-pin on 2026-10-03.
+worker/
+worker/**

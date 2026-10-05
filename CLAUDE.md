@@ -741,6 +741,90 @@ browser run confirmed the fallback — the new page against the OLD backend load
 all six stores land — at the cost of that one failed read in front (first figures 4.8s). `tests/opening_bundle_test.js` — 92 assertions, executes both sides; twelve mutations,
 each failing the assertion written for it.
 
+### …and the snapshot is served from CLOUDFLARE, not the /exec hop (v2.617, 2026-09-30)
+
+*This section was missing entirely until 2026-10-05 — v2.617 shipped with a long commit message and
+nothing in this file, and the bug below was then diagnosed from source rather than from here.*
+
+The open was already ONE call. What remained is the **hop**, and nothing in this repo reaches it:
+`/exec` fails to return on 30-70% of requests during windows that last hours and clear on their own
+(measured across five apps on 09-25 — crew 70%, leaderboard 53%, GX Core 50%, sales 38/45/31% — and
+every one of them at 0% on 09-30 at 11:15). So a Cloudflare Worker (`worker/src/index.js`) pulls
+`?action=bundle` on a 5-minute cron and serves the result; the dashboard reads THAT.
+
+- **It is a SHORTCUT, NOT A DEPENDENCY.** `fetchCachedBundle_` returns null on anything but a clean
+  answer — down, 401, stale, slow, empty — and `fetchOpenBundle_` falls through to the `/exec` path
+  unchanged. The worst case is the behavior the app already had, which is why it ships with no flag.
+- **It holds no `GC_SESSION_SECRET`** (that one signs sessions for the whole suite). Its own identity
+  is a read-only viewer token minted the way `gxdevlogin.sh` mints one, so it fails `roleCanEdit` and
+  cannot write anywhere. It serves **reads only**; every write still POSTs to Apps Script where
+  `writeGuard_` and the audit log live.
+- **A stale copy is never painted.** The Worker flags anything over an hour old (`BUNDLE_MAX_AGE_S`)
+  and the client drops it and pays the hop for a real number.
+- **Writes are the scarce resource, not reads** — Workers KV free tier is 1,000 writes/day against
+  100,000 reads, and Cloudflare emailed Sky at 50% one day in. So an unchanged snapshot is not
+  written back, an unchanged cron outcome is not recorded, and `fetched_at` deliberately does not
+  move on a no-op (bumping it would make a stalled upstream look perpetually fresh). Hitting the cap
+  does not fail loudly: `put` starts erroring and the cache quietly stops being a cache.
+- **`/health` reads back what the last cron actually DID.** The first deploy fired on schedule,
+  logged `Ok`, and cached nothing for twenty minutes — the handler had not thrown, so no dashboard
+  anywhere said otherwise.
+
+#### The shortcut was unreachable on the one open it was built for (2026-10-05)
+
+`bug_muvfkvez_f0ik`, filed from an iPhone at 08:54 PT: *"App took 2 minutes to load this morning."*
+No JS error was captured, and the 09:24 stall probe reads an ordinary **4.2%** with nothing over
+37s — **so this was not a bad `/exec` morning**, which is what made it worth chasing rather than
+filing under Google's side.
+
+**The Worker would not hand over the cached snapshot until it had verified the viewer by asking
+Sales `?action=ping` — over the same hop the Worker exists to keep people off.** The verdict lived
+**10 minutes**. A phone shut overnight has no verdict, so **the first open of every day** paid the
+hop before it was allowed to read a snapshot already sitting in KV.
+
+**MEASURED, five cold opens with freshly minted tokens, on a HEALTHY hop:**
+
+```
+7.4s · 7.0s · 6.5s · 4.3s · 8.2s -> 401   (the last one's verify timed out)
+```
+
+The client aborts the whole call at `BUNDLE_CACHE_TIMEOUT_MS` (**4000ms**). **Zero of five landed
+inside it.** Every morning open fell through to the piece-by-piece `/exec` path — the one that takes
+10-80s in a degraded window. A warm reload within 10 minutes answers in **0.18s**, which is why it
+tested fine and why nothing anywhere said otherwise.
+
+- **The hop is now paid ONCE per credential**, and three numbers hold that, each load-bearing:
+  `AUTH_TTL_S` 24h so a night cannot expire a verdict · `AUTH_REFRESH_AFTER_S` 12h to re-stamp a
+  token in active use so it stays warm forever · `AUTH_MAX_LIFETIME_MS` 6d so a chain of re-stamps
+  can never outlive the credential. **Without that last one an EXPIRED token would read from this
+  cache forever, which is a new hole and not a longer one.**
+- **The re-stamp is the only KV WRITE on the request path**, which is why it is twelve hours and not
+  every open: ~2/day per viewer against a 1,000/day cap.
+- **What it costs, said plainly:** a revoked person can read the cached snapshot for up to a day
+  after the grant is pulled. Read-only, and no wider than the token's own signature already grants
+  on every ordinary read route — `pingSession_` still signs them out of the app within ~10 minutes
+  and `writeGuard_` refuses every write server-side. **Sky's call, 2026-10-05, with that tradeoff
+  stated.**
+- **Verdicts written by the old version hold the literal `'ok'`.** They are honored and re-stamped
+  into the new shape; discarding them would make every signed-in viewer re-verify on every request.
+- **A verification TIMEOUT is still never cached as a refusal.** That guard predates this and is the
+  most expensive bug available in that file: during the exact window the cache exists for, every
+  verify fails, and caching those as "denied" locks the company out of it.
+- `tests/worker_bundle_cache_test.js` §12 — 13 new assertions, 41 total, executing the shipped
+  Worker. **Five mutations, each caught by the assertion written for it:** the TTL back to 600 fails
+  the overnight bound; the re-stamp removed fails the active-use check; re-stamping every request
+  fails the write budget; the lifetime cap removed fails the expired-token check; legacy verdicts
+  discarded fails the migration check. **The TTL is asserted as a LOWER BOUND, never an equality** —
+  the number may be tuned, the property may not.
+
+**The durable lesson is about where a shortcut's COST lands.** The Worker was built on exactly the
+right premise and then gated behind the thing it was avoiding, so it was fastest in the case nobody
+complains about (a reload a minute later) and absent in the only case anyone reports (the first open
+of the day). **Timing the warm path proves nothing about the cold one**, and the cold one is the
+product. Same shape as the River failure this file keeps returning to: not an outage, just a
+silently worse answer — and here the app's own instrumentation could not see it either, because from
+the client's side a fall-through to `/exec` is indistinguishable from a cache that was never there.
+
 ## Today's hop is slow some evenings — never abandon it and pull again (v2.592, 2026-09-13)
 
 Sky, on v2.591: *"it took 60+ seconds to load on mobile."* Measured minutes later with `loadprobe`:

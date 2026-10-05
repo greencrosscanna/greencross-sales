@@ -36,14 +36,18 @@ function ok(what, cond) {
 function fakeKV(seed) {
   const store = new Map(Object.entries(seed || {}));
   const writes = [];
+  /* `puts` keeps the OPTIONS as well as the key, because an expirationTtl is not observable from the
+   * stored value and a TTL too short to survive a night is the whole of section 12. */
+  const puts = [];
   return {
     writes,
+    puts,
     async get(key, type) {
       const v = store.get(key);
       if (v === undefined) return null;
       return type === 'json' ? JSON.parse(v) : v;
     },
-    async put(key, value) { writes.push(key); store.set(key, value); },
+    async put(key, value, opts) { writes.push(key); puts.push({ key, value, opts }); store.set(key, value); },
     _raw: store,
   };
 }
@@ -245,6 +249,95 @@ async function main() {
     const last = await kv.get('last_run', 'json');
     ok('...and it says it failed', last && last.ok === false);
     ok('a failed pull leaves the last good snapshot in place', !kv.writes.includes('bundle:v1'));
+  }
+
+  /* ── 12. THE MORNING OPEN — a verdict must survive a closed phone overnight ─────────────────── */
+  {
+    /* bug_muvfkvez_f0ik, 2026-10-05: "App took 2 minutes to load this morning". The verdict TTL was
+     * 10 minutes, so the first open of a day always had to verify — over the /exec hop this Worker
+     * exists to avoid. Measured on a HEALTHY hop that cost 4.3-8.2s against the client's 4000ms
+     * ceiling, five cold opens out of five, so the shortcut was unreachable on exactly the open it
+     * was built for. These assert the PROPERTY (a night cannot expire a verdict), not the number. */
+    const FRESH = () => JSON.stringify({ fetched_at: Date.now(), payload: GOOD_BUNDLE });
+    const authKey = kv => [...kv._raw.keys()].find(k => k.startsWith('auth:'));
+
+    {
+      /* The bug, head on: verified at close of business, opened the next morning. */
+      const yesterday = Date.now() - 17 * 3600 * 1000;
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      const key = authKey(kv);
+      kv._raw.set(key, JSON.stringify({ ok: 1, first: yesterday, last: yesterday }));
+      kv.writes.length = 0; kv.puts.length = 0;
+
+      const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      ok('a verdict from yesterday evening still opens the app this morning', res.status === 200);
+      ok('...and the morning open does NOT touch the /exec hop', calls.length === 1);
+      ok('...the verdict is re-stamped, since it is in active use', kv.writes.includes(key));
+      const restamped = JSON.parse(kv._raw.get(key));
+      ok('...and re-stamping KEEPS when it was first granted',
+        restamped.first === yesterday && restamped.last > yesterday);
+    }
+
+    {
+      /* The assertion that would have caught the shipped bug: the TTL written must outlast a night.
+       * Asserted as a lower bound, not an equality — the number may be tuned, the property may not. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      scriptedFetch([{ body: { ok: true } }]);
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), { GX: kv, GX_DEPLOY_SECRET: 's' }, {});
+      const put = kv.puts.find(p => p.key.startsWith('auth:'));
+      ok('the verdict is written with an expiry at all', put && put.opts && put.opts.expirationTtl);
+      ok('...and that expiry survives a closed phone overnight (>= 12h)',
+        put.opts.expirationTtl >= 12 * 3600);
+    }
+
+    {
+      /* The write budget: a verdict in use must not be re-stamped on every single open. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      kv.writes.length = 0;
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      ok('a verdict just stamped is not re-stamped on the next opens', kv.writes.length === 0);
+      ok('...and still makes no network call', calls.length === 1);
+    }
+
+    {
+      /* A chain of re-stamps must not outlive the credential. A session token lives 7 days; a
+       * verdict first granted 7 days ago has to go back and ask, or an EXPIRED token would read
+       * from this cache forever — a new hole, not a longer one. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }, { body: { ok: false, error: 'Invalid session' } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      const key = authKey(kv);
+      const weekAgo = Date.now() - 7 * 86400 * 1000;
+      kv._raw.set(key, JSON.stringify({ ok: 1, first: weekAgo, last: Date.now() }));
+
+      const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      ok('a verdict older than the token itself is re-verified, not trusted', calls.length === 2);
+      ok('...and Sales refusing it now refuses the read', res.status === 401);
+    }
+
+    {
+      /* Entries written by the 10-minute version hold the literal 'ok'. Honoring them costs nothing
+       * and skipping them would make every pre-existing viewer re-verify on every request. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      const key = authKey(kv);
+      kv._raw.set(key, 'ok');
+      kv.writes.length = 0;
+
+      const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      ok('a verdict left by the old version is still honored', res.status === 200 && calls.length === 1);
+      ok('...and is re-stamped into the new shape', kv.writes.includes(key));
+    }
   }
 
   console.log(passed + ' assertions passed');

@@ -31,8 +31,43 @@ const GXCORE_EXEC = 'https://script.google.com/macros/s/AKfycbx9mjeCBbDpxNYaqBv2
 const KV_BUNDLE   = 'bundle:v1';       // the cached snapshot + when it was fetched
 const KV_SESSION  = 'service_session'; // the Worker's own read-only viewer token
 const KV_LAST_RUN = 'last_run';        // what the last cron actually DID, not merely that it ran
-const AUTH_TTL_S  = 600;               // 10 min — matches the client's own pingSession_ cadence
 const BUNDLE_MAX_AGE_S = 3600;         // refuse to serve a snapshot older than this; say so instead
+
+/* HOW LONG A VERIFIED TOKEN STAYS VERIFIED — and why this is not the 10 minutes it shipped as.
+ *
+ * Verifying a viewer means ASKING Sales, over the same /exec hop this whole Worker exists to keep
+ * people off. At a 10-minute TTL that is not an edge case, it is the FIRST OPEN OF EVERY DAY: the
+ * phone has been shut overnight, the verdict has long expired, and the open pays the hop before it
+ * may read a snapshot that is already sitting here.
+ *
+ * MEASURED 2026-10-05, five cold opens with freshly minted tokens on a HEALTHY hop:
+ * 7.4s · 7.0s · 6.5s · 4.3s · and one 8.2s that returned 401 because the verify itself timed out.
+ * The client aborts the whole call at BUNDLE_CACHE_TIMEOUT_MS (4000ms), so ZERO of five landed
+ * inside its window. Every morning open fell through to the piece-by-piece /exec path — the path
+ * that takes 10-80s in a degraded window. That is bug_muvfkvez_f0ik, "App took 2 minutes to load
+ * this morning": the shortcut was unreachable on exactly the open it was built for, while every
+ * warm reload within 10 minutes answered in 0.18s, which is why it tested fine.
+ *
+ * So the hop is paid ONCE per credential, at first use, and a token in active use is re-stamped
+ * rather than re-verified. Three numbers, each load-bearing:
+ *
+ *   TTL          one day, so a night never expires a verdict.
+ *   REFRESH      re-stamp after half of it, so an in-use token stays warm forever. This is the only
+ *                KV WRITE on the request path, and writes are the scarce resource here (1,000/day;
+ *                see `record`) — at twelve hours that is ~2/day per viewer, not one per open.
+ *   MAX_LIFETIME a chain of re-stamps must never outlive the credential it was granted for. A
+ *                session token lives 7 days, so at 6 days this stops re-stamping and goes back and
+ *                asks Sales. Without it an EXPIRED token would read from this cache forever, which
+ *                is a new hole rather than a longer one.
+ *
+ * WHAT THIS COSTS, said plainly: a revoked person can read the cached snapshot for up to a day
+ * after the grant is pulled. It is read-only, it is no wider than the token's own signature already
+ * grants on every ordinary read route (the app's own pingSession_ still signs them out of the app
+ * within ~10 minutes, and every WRITE is refused server-side by writeGuard_), and it was Sky's call
+ * on 2026-10-05 with that tradeoff in front of him. */
+const AUTH_TTL_S            = 86400;        // 24h — a stamp must survive a closed phone overnight
+const AUTH_REFRESH_AFTER_S  = 43200;        // 12h — re-stamp a verdict in active use
+const AUTH_MAX_LIFETIME_MS  = 6 * 86400000; // 6d  — then re-ask Sales; tokens only live 7
 
 /* Growing timeouts, not a flat one, for the reason gxdevlogin.sh spells out: the two-hop /exec has
  * a cheap fast bounce AND a cold-instance stall of tens of seconds. One number cannot serve both.
@@ -194,12 +229,35 @@ async function authorized(env, token) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   const key = 'auth:' + [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 
+  /* The stored verdict carries WHEN it was first granted and when it was last stamped, because
+   * "verified" alone cannot answer either question this needs: whether to re-stamp, and whether the
+   * chain has run longer than the credential is allowed to live. */
+  const stamp = async (first) => {
+    try {
+      await env.GX.put(key, JSON.stringify({ ok: 1, first: first, last: Date.now() }),
+                       { expirationTtl: AUTH_TTL_S });
+    } catch (e) { /* a failed stamp costs the next open one hop, never this request its answer */ }
+  };
+
   const cached = await env.GX.get(key);
-  if (cached === 'ok') return true;
+  if (cached) {
+    /* `'ok'` is what the 10-minute version wrote. It parses as nothing, so treat it as verified with
+     * an unknown history and re-stamp it from now — otherwise every entry written before this change
+     * would sit unrecognized and re-verify on every single request. */
+    let held = null;
+    try { held = JSON.parse(cached); } catch (e) {}
+    const first = held && Number.isFinite(held.first) ? held.first : Date.now();
+    const last  = held && Number.isFinite(held.last)  ? held.last  : 0;
+    if (Date.now() - first <= AUTH_MAX_LIFETIME_MS) {
+      if (Date.now() - last > AUTH_REFRESH_AFTER_S * 1000) await stamp(first);
+      return true;
+    }
+    /* Past the cap: fall through and ask Sales, exactly as if nothing were cached. */
+  }
 
   const r = await fetchJson(`${SALES_EXEC}?action=ping&token=${encodeURIComponent(token)}`, AUTH_TIMEOUT_MS);
   if (r && r.ok) {
-    await env.GX.put(key, 'ok', { expirationTtl: AUTH_TTL_S });
+    await stamp(Date.now());
     return true;
   }
   /* A timeout is NOT a refusal, and must not be cached as one. During a degraded window every

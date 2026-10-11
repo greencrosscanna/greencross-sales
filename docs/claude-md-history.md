@@ -1993,6 +1993,31 @@ that never took.
 `tests/qb_deposits_shape_test.js` (38 assertions) executes `reconBankedOn_` against every live case
 above, including all three refund memos and each year typo.
 
+#### The one-day month-end half landed on the week before (fixed v2.619, 2026-10-11)
+
+Sky, 2026-10-09: *"This weeks deposits (for last weeks sales) spans a month. When this happens Shawn
+makes 2 deposits per store so that revenue maps correctly to the right month in QuickBooks. For this
+app we need to count both deposits."*
+
+**Both were counted — one of them on the wrong week.** 09-30 was a Wednesday, the first day of the
+four Salem stores' week, so their September half covered one day and was booked ON a week-start day.
+`reconWindowForDeposit` steps back a day, which sent it to the 09-23 week: that week read over by a
+day's sales and 09-30 → 10-06 read short by the same amount. Bend and Hillsboro (Tuesday weeks)
+booked `(9/29/26 - 9/30/26)` mid-week and were right all along, which is why it looked store-specific.
+
+MEASURED on the live `reconprobe`: TxnDate is the LAST sales day a deposit covers, so the step-back
+is right for every booking except one dated on a week-start day — where the date alone cannot say
+whether it is the closed week or a one-day half of the opening one. Only the memo's period says, so
+`reconCoversFrom_` reads its START date and the rule consults it **only in that tie, and only to
+choose between those two windows**. Same defenses as `reconBankedOn_`: typed year ignored, round-trip,
+0..13 days on or before the booking date, anything else falls back to the date rule.
+
+Run over all 182 deposit memos 2026-05-01..10-11: **six** change week, every one a one-day month-end
+half — the four above plus `BEND` / `HILLSBORO … Dep (6/30/26)` (06-30 was a Tuesday). Nothing else
+moves. A deposit already moved by hand keeps its manual week.
+
+`tests/recon_month_boundary_test.js` section 6, on the live memos; verified by mutation.
+
 **Corporate money was NEVER in the headline — the NOTE was what said otherwise.** Sky, 2026-09-07:
 *"the KPI card should exclude any deposits that have been ignored, so wk31 should be
 199490-12662-27"*, then *"or if its easier, only show deposits attributed to store CLASS's, not

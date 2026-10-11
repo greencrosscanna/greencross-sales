@@ -64,7 +64,7 @@ for (const decl of ['RECON_WEEK_START_FALLBACK', 'RECON_SALES_MEMOS']) {
 }
 for (const fn of ['getISOWeek', 'getUserWeek', 'getDaysOfISOWeek', 'monthRange',
                   'reconAddDays', 'reconDow', 'reconWindowStart', 'reconWindows',
-                  'reconIsEmptyWindow', 'reconWeekStartFor', 'reconWindowForDeposit',
+                  'reconIsEmptyWindow', 'reconWeekStartFor', 'reconWindowForDeposit', 'reconCoversFrom_',
                   'reconExpectedFor', 'reconBuildRow', 'reconStateKey', 'reconIsDone',
                   'reconIsSalesDeposit', 'reconSplitStrays', 'reconIsPending']) {
   vm.runInContext(grab(fn), ctx);
@@ -178,6 +178,45 @@ C.reconData = { config: {}, assign: {}, state: {}, deposits: { River: [] } };
 const zeroRow = C.reconBuildRow('River', { start: '2026-08-26', end: '2026-09-01' });
 ok('a week with real zero sales is kept — that is data, not absence',
    C.reconIsEmptyWindow(zeroRow) === false);
+
+console.log('\na month-end split booked ON a week-start day joins the week it covers');
+// ── 6. Sky, 2026-10-09: "This weeks deposits (for last weeks sales) spans a month" ─────────────
+// The live memos and booking dates from reconprobe 2026-09-22..10-11. 09-30 is a Wednesday, so for
+// the Wed-start stores the September half is one day, booked on the first day of its own week.
+C.reconData = { config: {}, assign: {} };
+const W = (store, date, note) => C.reconWindowForDeposit(store, { id: 'm', date, note });
+ok('Center: the 09-30 one-day half pays for 09-30 .. 10-06, not the week before',
+   W('Center', '2026-09-30', 'CENTER 10.07.26 Dep (9/30/26)') === '2026-09-30');
+ok('Center: the October half lands on the same week',
+   W('Center', '2026-10-06', 'CENTER 10.07.26 Dep (10/1/26 - 10/6/26)') === '2026-09-30');
+ok('Commercial (memo says SOUTH): same, the store name in the memo is not read',
+   W('Commercial', '2026-09-30', 'SOUTH 10.07.26 Dep (9/30/26)') === '2026-09-30');
+ok('Bend (Tue weeks): both halves were already on 09-29 .. 10-05 and still are',
+   W('Bend', '2026-09-30', 'BEND 10.06.26 Dep (9/29/26 - 9/30/26)') === '2026-09-29' &&
+   W('Bend', '2026-10-05', 'BEND 10.06.26 Dep (10/1/26 - 10/5/26)') === '2026-09-29');
+ok('the ordinary week before it is untouched',
+   W('Center', '2026-09-29', 'CENTER 09.30.26 Dep (9/23/26 - 9/29/26)') === '2026-09-23');
+// The other reading of a week-start date: an ordinary deposit booked the day AFTER its week closed.
+ok('a week-start booking whose memo covers the CLOSED week stays on the closed week',
+   W('Center', '2026-09-30', 'CENTER 09.30.26 Dep (9/23/26 - 9/29/26)') === '2026-09-23');
+ok('no memo: the date rule, exactly as before',
+   W('Center', '2026-09-30', '') === '2026-09-23' &&
+   C.reconWindowForDeposit('Center', { id: 'm', date: '2026-09-30' }) === '2026-09-23');
+ok('an unreadable period falls back to the date rule',
+   W('Center', '2026-09-30', 'CENTER 10.07.26 Dep (0/0/26)') === '2026-09-23' &&
+   W('Center', '2026-09-30', 'Order Correction (refund') === '2026-09-23');
+ok('a period starting AFTER the booking date is a typo, not a fact',
+   W('Center', '2026-09-30', 'CENTER 10.07.26 Dep (10/3/26)') === '2026-09-23');
+ok('the typed year is ignored — `.25` in 2026 still reads as this year',
+   C.reconCoversFrom_({ date: '2026-09-30', note: 'CENTER 10.07.25 Dep (9/30/25)' }) === '2026-09-30');
+ok('a January booking can cover late December',
+   C.reconCoversFrom_({ date: '2027-01-02', note: 'BEND 01.05.27 Dep (12/29/26 - 1/2/27)' }) === '2026-12-29');
+ok('a manual move still wins over the memo',
+   (C.reconData.assign = { m: '2026-09-23' }) &&
+   W('Center', '2026-09-30', 'CENTER 10.07.26 Dep (9/30/26)') === '2026-09-23');
+C.reconData.assign = {};
+ok('October lists the window the 09-30 half now lands on',
+   C.reconWindows('Center', '2026-10-01', '2026-10-31').some(w => w.start === '2026-09-30'));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

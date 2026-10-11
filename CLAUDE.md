@@ -406,8 +406,12 @@ Hist: "Sync with the brain" · "Verify the GXCore pin" · "GXCore pin history"
 - **The QuickBooks deposit date (`TxnDate`) is an ACCOUNTING date; the real one is in the memo** (`note`
   from Core v305 → `reconBankedOn_` → `banked_on`; `reconBankedDate_` is `banked_on || date`). **Only the
   Reconcile WEEK headline uses it** — the P&L, every month view and store-week ATTRIBUTION keep `TxnDate`.
+- **A deposit booked ON a week-start day is the one case the date cannot decide** (the week that just
+  closed, or a one-day month-end half of the week now opening). `reconWindowForDeposit` asks the memo's
+  period START (`reconCoversFrom_`) **only there, and only to pick between those two windows** — never
+  widen it into general attribution. Unreadable → the date rule. A manual move still wins.
 - Memo parser: **THE MEMO'S YEAR IS IGNORED** (year from `TxnDate`) · **THE PERIOD IN PARENTHESES IS
-  NEVER PARSED** · **THE SEPARATOR IS OPTIONAL** · lag bound `RECON_BANKED_MAX_LAG_` (0..14 days, else
+  NEVER PARSED** for the banked date (the week-start tie-break above is its only reader) · **THE SEPARATOR IS OPTIONAL** · lag bound `RECON_BANKED_MAX_LAG_` (0..14 days, else
   `TxnDate`) · `''` means "use TxnDate". The banked date is NOT a uniform offset. **Do not join on the
   memo's store name** (`SOUTH` = Commercial — a third vocabulary).
 - Swipe: any element with **`data-pswipe="<selector>"`** (the selector re-finds the node AFTER
@@ -419,6 +423,7 @@ Hist: "Sync with the brain" · "Verify the GXCore pin" · "GXCore pin history"
 Tests: `deposit_reconciliation`, `recon_month_boundary`, `recon_banked_kpi`, `qb_deposits_shape`,
 `recon_load_resilience`.
 Hist: "Reconcile counts" · "month turns" · "Reconcile headline" · "ACCOUNTING date" · "parser rules"
+· "one-day month-end half"
 
 ## Goals
 

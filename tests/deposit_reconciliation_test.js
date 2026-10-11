@@ -64,7 +64,7 @@ if (!SALES_MEMOS_SRC) { console.log('RECON_SALES_MEMOS is gone from index.html')
                         console.log('\n0 passed, 1 failed'); process.exit(1); }
 vm.runInContext(SALES_MEMOS_SRC[0], ctx);
 for (const fn of ['reconAddDays', 'reconDow', 'reconWindowStart', 'reconWindows',
-                  'reconWeekStartFor', 'reconWindowForDeposit', 'reconExpectedFor',
+                  'reconWeekStartFor', 'reconWindowForDeposit', 'reconCoversFrom_', 'reconExpectedFor',
                   'reconIsPending', 'reconUnattributedIn', 'reconIsSalesDeposit', 'reconSplitStrays', 'reconStraysFrom',
                   'reconStateKey', 'reconIsDone', 'reconBuildRow',
                   'reconRangeKey', 'reconDataStale_']) {

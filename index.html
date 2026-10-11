@@ -1460,7 +1460,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.618';
+const APP_VERSION = 'v2.619';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -8229,7 +8229,50 @@ function reconWindowForDeposit(store, dep) {
   const ws = reconWeekStartFor(store);
   // Step back one day so a deposit made ON a window's start date pays for the window that just
   // closed, not the one opening that morning.
-  return reconWindowStart(reconAddDays(dep.date, -1), ws);
+  const closed = reconWindowStart(reconAddDays(dep.date, -1), ws);
+  // THE ONE CASE THE DATE CANNOT DECIDE: a deposit dated ON a week-start day. It is either the week
+  // that just closed, or — when the month ends on that day — the first half of a month-end split,
+  // covering that single day of the week now opening. Sky, 2026-10-09: "This weeks deposits (for
+  // last weeks sales) spans a month ... we need to count both deposits."
+  //
+  // MEASURED on the live reconprobe, 2026-09-22..10-11: 09-30 is a Wednesday, so the four Salem
+  // stores each booked `… 10.07.26 Dep (9/30/26)` on 09-30 and `… Dep (10/1/26 - 10/6/26)` on 10-06.
+  // The step-back sent the 09-30 half to the 09-23 week — one week over, the next one short. Bend
+  // and Hillsboro (Tue start) booked `(9/29/26 - 9/30/26)` on a Wednesday, mid-week, and were fine.
+  //
+  // Only the memo says which, so it is asked ONLY here and can only pick between these two windows.
+  // Everywhere else the date rule stands exactly as it was.
+  const opening = reconWindowStart(dep.date, ws);
+  if (opening !== closed) {
+    const covers = reconCoversFrom_(dep);
+    if (covers && reconWindowStart(covers, ws) === opening) return opening;
+  }
+  return closed;
+}
+
+// The FIRST sales day a deposit covers, read from the period in the memo's parentheses —
+// `BEND 10.06.26 Dep (9/29/26 - 9/30/26)` → 2026-09-29, `CENTER 10.07.26 Dep (9/30/26)` → 2026-09-30.
+// '' when it cannot be read or is not believable, and '' means "use the date rule".
+//
+// The proxy's reconBankedOn_ deliberately never parses this part, and its reasons hold here: it is
+// the dirtiest part of the string (`(5/6/26 - 0/0/26)`, `Order Correction (refund`). So the same
+// defenses: the typed YEAR is ignored and taken from the booking date, the date must round-trip,
+// and it must fall 0..13 days on or before the booking date — a deposit cannot cover a day after
+// it was booked for, nor reach back past two weeks.
+function reconCoversFrom_(dep) {
+  const MAX_BACK = 13;
+  const m = /\(\s*(\d{1,2})\/(\d{1,2})\/\d{2,4}/.exec(String((dep && dep.note) || ''));
+  const booked = String((dep && dep.date) || '');
+  if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(booked)) return '';
+  const mm = Number(m[1]), dd = Number(m[2]), yr = Number(booked.slice(0, 4));
+  // The booking year, then the one before — a January booking covering late December.
+  for (let i = 0; i < 2; i++) {
+    const d = new Date(Date.UTC(yr - i, mm - 1, dd));
+    if (d.getUTCFullYear() !== yr - i || d.getUTCMonth() !== mm - 1 || d.getUTCDate() !== dd) continue;
+    const cand = d.toISOString().slice(0, 10);
+    if (cand <= booked && cand >= reconAddDays(booked, -MAX_BACK)) return cand;
+  }
+  return '';
 }
 
 // Sales side for one store over one window: Net Sales + Tax, summed from the daily data already

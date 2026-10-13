@@ -49,3 +49,13 @@ tools/**
 # ES `export` was a parse error that blocked a library re-pin on 2026-10-03.
 worker/
 worker/**
+
+# One-off Node scripts (scripts/tmp/…). FIFTH instance of the one mechanism this file explains four
+# times, and the first that took the app DOWN rather than blocking a deploy: on 2026-10-13 a library
+# re-pin pushed scripts/tmp/recon-live-attribution.js as Apps Script source. It PARSED — so the push
+# and the redeploy both reported success — and then threw `ReferenceError: require is not defined`
+# at load, on every request, because Apps Script runs every file's top level. The engine answered
+# nothing for about ten minutes at midday. A file that fails to parse stops the deploy; a file that
+# parses and throws stops the app, and nothing in the deploy says so.
+scripts/
+scripts/**

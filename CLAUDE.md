@@ -19,14 +19,14 @@ heading to search for there. **Read that section before changing the code a rule
 - Ship: commit → push (Pages) → `./deploy.sh` (records to `app_versions`; reads `git show
   HEAD:index.html`, not the tree; `GX_VERSION=vX.YYY` forces a version, `GX_ALLOW_DIRTY=1` proceeds when
   they disagree). Backend: `./gxengine.sh --deploy` — it stops rather than guess a deployment
-  (`GX_DEPLOY_ID=` overrides). The live deployment is `AKfycbzju5He…` (`DEFAULT_PROXY` in `index.html`);
-  by hand: `clasp push --force` then `clasp update-deployment AKfycbzju5He…`.
+  (`GX_DEPLOY_ID=` overrides). The live deployment is `AKfycbzju5He…` (`DEFAULT_PROXY` in `index.html`).
+  Don't deploy the engine by hand with raw `clasp` — it records nothing to `core_pins`.
 - After **every** `./gx-sync.sh`, `chmod 755` the synced scripts before committing — Dropbox strips the
   exec bit. Shared files (`deploy.sh`, `serve.py`, `gx-preflight.sh`, `.claude/gx-brain-notes.sh`) come
   from gx-theme; edit them **there**. This CLAUDE.md is **not** synced.
 - Tests: `tests/*_test.js`, run by the **pre-push hook** (`gx-preflight.sh`; a failure blocks the push)
-  and by `.claude/gx-posttool-tests.sh` after every edit to the two source files. Run them:
-  `ls tests/*_test.js | xargs -n1 node`. They read the real source, never a copy. `cross_app_contract`
+  and by `.claude/gx-posttool-tests.sh` after every edit to the two source files. Run one with
+  `node tests/<name>_test.js`. They read the real source, never a copy. `cross_app_contract`
   and `store_palette_drift` are hub wrappers that **SKIP — not fail** — without a sibling
   `greencross-command-center`: read it, don't assume green means covered.
 - `orphan_css_classes`: every class used is defined and every class defined is used. `dev_guard_actions`:
@@ -285,7 +285,7 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
   independent per-request drops. ~3.4% six-wide is one evening's baseline, not a constant. **NOTHING
   CLIENT-SIDE FIXES THIS.** Ceilings decide what a stall COSTS; retries decide how many are LOST; fewer
   requests per load does not help a bad day.
-- **Do not re-tune a ceiling or an attempt count on one run or one morning** (the v2.592 mistake).
+- **Do not re-tune a ceiling or an attempt count on one run or one morning.**
   Re-measure the RATE first: `python3 tools/exec_stall_probe.py` (six-wide `libversion`, logs in
   `tools/stall-log/`), several bursts over several minutes — **ONE READING PROVES NOTHING**.
 - Compare probe runs with each other, never with the 3.4% store-pull baseline; do not pool rates across
@@ -365,8 +365,7 @@ curl -sL -G "<sales /exec>" --data-urlencode action=gxpin --data-urlencode "secr
   cache yet). **A `Forbidden` here is a finding, not a route bug**: `GX_DEPLOY_SECRET` is unset or stale
   on this script, and that same property gates `qbReportViaGXCore_`. Re-check after any deploy that
   touches script properties. Pinned to GXCore — check the live value, do not trust any written number
-  (`?action=libversion`, or `./gxpins.sh --live` from the hub); v315 on 2026-09-09 is a reading, not a
-  promise.
+  (`?action=libversion`, or `./gxpins.sh --live` from the hub).
 - **Re-run the discriminating probes after any GXCore re-pin** (all `&secret=…`):
   `goalprobe&date=YYYY-MM-DD` (must return all SIX stores) · `goalrangeprobe&start=…&end=…` ·
   `budgetprobe` · `expbreakprobe` · `pnlprobe` · `reconprobe` (`notes_seen: 0` over a range that HAS
@@ -461,12 +460,11 @@ Tests: `goal_attainment`, `pacing_agreement`. Hist: "FROZEN PAY-PERIOD"
 - **Enforce fails CLOSED on a Core error as well as on a missing grant.** A GX Core outage blocks Sales
   writes; reads are unaffected. A Core-side break looks exactly like an outage. Unauthenticated and
   forged-token writes are refused at the session gate ABOVE the guard.
-- The mode changes only on Sky's explicit instruction *(sentence added 2026-10-09; original in history
-  § "The write guard")*. After a rollback to `log`: **do not flip to `enforce` until the log shows a real
-  NON-SUPERADMIN user ADMITTED** *(reworded 2026-10-09; original in history § "The write guard")*.
+- The mode changes only on Sky's explicit instruction. After a rollback to `log`: **do not flip to
+  `enforce` until the log shows a real NON-SUPERADMIN user ADMITTED.**
   `action=guardmode` exists for
   ROLLBACK, not convenience — a revert must be seconds away and must not depend on anyone being at a
-  browser. **Roll back in one command** (the same call with `mode=log`):
+  browser. The call below sets `enforce`; **rolling back is the same call with `mode=log`**:
 
 ```
 curl -sL -G "<sales /exec>" --data-urlencode action=guardmode --data-urlencode "secret=$(cat .gx_deploy_secret)" --data-urlencode mode=enforce

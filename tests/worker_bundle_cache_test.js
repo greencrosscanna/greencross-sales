@@ -85,7 +85,25 @@ async function runScheduled(worker, env) {
   if (pending) await pending;
 }
 
+/* PIN THE CLOCK. Outside store hours (22:30-07:30 PT) the scheduled job skips any snapshot under 55
+ * minutes old, so with the real clock every scheduled check below depended on the time of day: one
+ * failed after 22:30, and the "nothing was written" checks passed vacuously because nothing ran.
+ * Shifts the whole process's clock — test seeds and worker alike — to `hour`:00 Los Angeles today. */
+const RealDate = Date;
+function pinClockLA(hour) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+  }).formatToParts(new RealDate(RealDate.now()));
+  const get = t => Number(parts.find(p => p.type === t).value);
+  const delta = ((hour * 60) - (get('hour') * 60 + get('minute'))) * 60000;
+  global.Date = class extends RealDate {
+    constructor(...a) { if (a.length) super(...a); else super(RealDate.now() + delta); }
+    static now() { return RealDate.now() + delta; }
+  };
+}
+
 async function main() {
+  pinClockLA(12);   // store hours; the off-hours rule has its own section at the end
   const mod = await import('file://' + WORKER);
   const worker = mod.default;
 
@@ -338,6 +356,30 @@ async function main() {
       ok('a verdict left by the old version is still honored', res.status === 200 && calls.length === 1);
       ok('...and is re-stamped into the new shape', kv.writes.includes(key));
     }
+  }
+
+  {
+    /* Off hours: a recent snapshot is left alone; one older than the hourly floor is refreshed. */
+    pinClockLA(23);
+    const BUNDLE = { ok: true, stores: [{ id: 'river-rd', net: 1234 }] };
+    const MOVED = { ok: true, stores: [{ id: 'river-rd', net: 9999 }] };
+    const seed = ageMs => fakeKV({
+      'service_session': JSON.stringify({ token: 'svc', expires_ms: Date.now() + 7 * 86400000 }),
+      'bundle:v1': JSON.stringify({ fetched_at: Date.now() - ageMs, payload: BUNDLE }),
+      'last_run': JSON.stringify({ ok: true, at: Date.now() - 60000 }),
+    });
+
+    const quiet = seed(60000);
+    const quietCalls = scriptedFetch([]);
+    await runScheduled(worker, { GX: quiet, GX_DEPLOY_SECRET: 's' });
+    ok('off hours, a minute-old snapshot is not re-fetched', quietCalls.length === 0);
+    ok('...and nothing is written', quiet.writes.length === 0);
+
+    const stale = seed(2 * 3600000);
+    scriptedFetch([{ body: MOVED }]);
+    await runScheduled(worker, { GX: stale, GX_DEPLOY_SECRET: 's' });
+    ok('off hours, a two-hour-old snapshot IS refreshed', stale.writes.includes('bundle:v1'));
+    global.Date = RealDate;
   }
 
   console.log(passed + ' assertions passed');

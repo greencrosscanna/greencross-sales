@@ -358,7 +358,7 @@ Tests: `bug_mail_fallback`, `secret_scrub`. Hist: "filed bug whose email dies" �
   and the second gets skipped: set the version, then **deploy**. Then measure (`?action=libversion`, or):
 
 ```
-curl -sL -G "<sales /exec>" --data-urlencode action=gxpin --data-urlencode "secret=$(cat .gx_deploy_secret)"
+bash gxsalesprobe.sh gxpin
 ```
 
   `gxpin` returns `GXCore.libVersion()` plus `qb.last_source` (`gxcore@…`; `null` = nothing has missed
@@ -366,10 +366,10 @@ curl -sL -G "<sales /exec>" --data-urlencode action=gxpin --data-urlencode "secr
   on this script, and that same property gates `qbReportViaGXCore_`. Re-check after any deploy that
   touches script properties. Pinned to GXCore — check the live value, do not trust any written number
   (`?action=libversion`, or `./gxpins.sh --live` from the hub).
-- **Re-run the discriminating probes after any GXCore re-pin** (all `&secret=…`):
-  `goalprobe&date=YYYY-MM-DD` (must return all SIX stores) · `goalrangeprobe&start=…&end=…` ·
+- **Re-run the discriminating probes after any GXCore re-pin** (`bash gxsalesprobe.sh <route> [key=value…]`):
+  `goalprobe date=YYYY-MM-DD` (must return all SIX stores) · `goalrangeprobe start=… end=…` ·
   `budgetprobe` · `expbreakprobe` · `pnlprobe` · `reconprobe` (`notes_seen: 0` over a range that HAS
-  deposits = a Core without `PrivateNote`) · `authprobe&user=shawn`. A pin that reports the right version
+  deposits = a Core without `PrivateNote`) · `authprobe user=shawn`. A pin that reports the right version
   and still returns the wrong data is a different failure from one that never took.
 - A Core bug is fixed in Core; the workaround belongs nowhere. `expectedSalesFrac` does NOT share the
   store-alias assumption — `getPacingFracs_` is fine as written.
@@ -464,10 +464,10 @@ Tests: `goal_attainment`, `pacing_agreement`. Hist: "FROZEN PAY-PERIOD"
   `enforce` until the log shows a real NON-SUPERADMIN user ADMITTED.**
   `action=guardmode` exists for
   ROLLBACK, not convenience — a revert must be seconds away and must not depend on anyone being at a
-  browser. The call below sets `enforce`; **rolling back is the same call with `mode=log`**:
+  browser. **Roll back in one command:**
 
 ```
-curl -sL -G "<sales /exec>" --data-urlencode action=guardmode --data-urlencode "secret=$(cat .gx_deploy_secret)" --data-urlencode mode=enforce
+bash gxsalesprobe.sh guardmode mode=log
 ```
 
   `mode` is validated against an array with `indexOf` — **deliberately not an object checked with
@@ -477,7 +477,7 @@ curl -sL -G "<sales /exec>" --data-urlencode action=guardmode --data-urlencode "
   as well as refusals:
 
 ```
-curl -sL -G "<sales /exec>" --data-urlencode action=authprobe --data-urlencode "secret=$(cat .gx_deploy_secret)"
+bash gxsalesprobe.sh authprobe
 ```
 
   Sky's call (2026-08-24): the log may not capture every write — don't cite it as proof of an admit,

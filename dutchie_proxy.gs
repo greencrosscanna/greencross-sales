@@ -4380,13 +4380,61 @@ function getOtherRevData_() {
   return data;
 }
 
+/* THE ATM TOTAL IS THE MACHINE COUNTS × THE RATE, WHENEVER THE MONTH HAS COUNTS.
+ *
+ * ATM used to live in two records that never spoke: per-machine transaction counts (`rev_atm_<year>`,
+ * the Revenue tab) and a hand-typed monthly dollar total (`otherrev_data.atm`, the Income pencil) —
+ * and ONLY the second reaches net sales. On 2026-11-06 August's counts were entered, net sales still
+ * carried $0 ATM for August, and July had sat at $0 since its counts went in. Jan–Jun's typed totals
+ * were measured equal to counts × 1.75 to the cent, so deriving changes no past figure.
+ *
+ * A month with ANY counts is derived; a month with none keeps the stored figure (the fallback for
+ * months typed before counts existed). `atm_from_counts` names the derived months so the Income
+ * pencil can refuse to offer an edit that would be overruled. If the counts cannot be read the stored
+ * totals are returned unchanged — this must never be the reason net sales loses its ATM line.
+ *
+ * The year is today's LA year: `otherrev_data` has no year of its own and has always meant "this
+ * year", which is a limitation of that record, not something this adds. */
+function otherRevWithAtmCounts_(data) {
+  const out = { atm: Object.assign({}, (data && data.atm) || {}), sublet: (data && data.sublet) || {}, atm_from_counts: [] };
+  try {
+    const year   = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy');
+    const counts = getRevYearData_('atm', year);
+    const rate   = Number(getRevConfig_().atm_rate);
+    if (!(rate > 0)) return out;
+    MONTHS_12_.forEach(function (m) {
+      let txns = 0;
+      const byStore = counts[m] || {};
+      Object.keys(byStore).forEach(function (st) {
+        const byMachine = byStore[st] || {};
+        Object.keys(byMachine).forEach(function (mc) { txns += Number(byMachine[mc] || 0); });
+      });
+      if (txns > 0) {
+        out.atm[m] = Math.round(txns * rate * 100) / 100;
+        out.atm_from_counts.push(m);
+      }
+    });
+  } catch (e) {
+    Logger.log('otherRevWithAtmCounts_: counts unreadable, serving stored totals: ' + errText_(e));
+  }
+  return out;
+}
+
+/* An ATM write changed what net sales should carry. The script cache is dropped here and a snapshot
+ * rebuild is scheduled, so a phone opening on the snapshot does not keep the old total until the
+ * next 5-minute build — or, after 22:15, until morning. bundleKick_ is throttled and never blocks. */
+function otherRevChanged_() {
+  cacheDelete_('otherrev');
+  bundleKick_();
+}
+
 function getOtherRevenue() {
   const output = ContentService.createTextOutput();
   output.setMimeType(ContentService.MimeType.JSON);
   const cached = cacheGet_('otherrev');
   if (cached) { setReply_(output, cached); return output; }
   try {
-    const data    = getOtherRevData_();
+    const data    = otherRevWithAtmCounts_(getOtherRevData_());
     const content = JSON.stringify(data);
     cacheSet_('otherrev', content, 3600);
     setReply_(output, content);
@@ -4405,10 +4453,15 @@ function setOtherRevenue(params) {
   if (isNaN(value) || value < 0)             return jsonOut_({ ok: false, error: 'invalid value' });
   try {
     const data     = getOtherRevData_();
+    // A typed ATM total for a month that has machine counts would be stored and then overruled by
+    // the derived figure — a save that "worked" and changed nothing. Refuse it and say where to go.
+    if (type === 'atm' && otherRevWithAtmCounts_(data).atm_from_counts.indexOf(month) >= 0) {
+      return jsonOut_({ ok: false, error: month + ' ATM comes from the machine counts — edit them on the Revenue tab' });
+    }
     data[type][month] = Math.round(value * 100) / 100;
     PropertiesService.getScriptProperties().setProperty(OTHERREV_PROP, JSON.stringify(data));
-    cacheDelete_('otherrev');
-    return jsonOut_({ ok: true, data });
+    otherRevChanged_();
+    return jsonOut_({ ok: true, data: otherRevWithAtmCounts_(data) });
   } catch(e) {
     return jsonOut_({ ok: false, error: errText_(e) });
   }
@@ -4569,8 +4622,9 @@ function setRevenueLine(params) {
     if (!data[month][store]) data[month][store] = {};
     data[month][store][item] = value;
     PropertiesService.getScriptProperties().setProperty('rev_' + type + '_' + year, JSON.stringify(data));
-    cacheDelete_('otherrev');
-    return jsonOut_({ ok: true });
+    otherRevChanged_();
+    // The new net-sales totals ride back on the reply, so the page updates Income without a reload.
+    return jsonOut_({ ok: true, otherrev: otherRevWithAtmCounts_(getOtherRevData_()) });
   } catch(e) {
     return jsonOut_({ ok: false, error: errText_(e) });
   }

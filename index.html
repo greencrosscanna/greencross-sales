@@ -1460,7 +1460,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.619';
+const APP_VERSION = 'v2.620';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -2872,7 +2872,10 @@ const CACHE_TTL = {
   goals:      24 * 60 * 60 * 1000,   // 24 hours — small, localStorage
   lb_goals:   30 * 60 * 1000,        // 30 min  — small, localStorage
   expbudgets: 24 * 60 * 60 * 1000,   //           small, localStorage
-  otherrev:    24 * 60 * 60 * 1000,   //           small, localStorage
+  // 1 hour, not 24: ATM is entered from any device, and a day-old copy here meant a phone kept the
+  // old net-sales ATM figure for a day after it changed. An expired copy is still the fallback when
+  // the fetch fails (readStaleCache in loadOtherRevenue), so shortening this costs no figure.
+  otherrev:    60 * 60 * 1000,       // 1 hour  — small, localStorage
   rev_detail:  60 * 60 * 1000,       // 1 hour  — revenue detail per year, localStorage
   inventory:   30 * 60 * 1000,       // 30 min  — per-store, localStorage
   velocity:    2 * 60 * 60 * 1000,   // 2 hours — large, stored in sessionMemCache only
@@ -6264,7 +6267,12 @@ function _incomeOtherRevHtml() {
   const subletHidden = hiddenOtherRevs.has('sublet');
   const atmVal    = computeOtherRev('atm');
   const subletVal = computeOtherRev('sublet');
-  const editBtn = (type) => isYTD ? '' :
+  // A month whose ATM total comes from the machine counts gets no pencil: the backend refuses a
+  // typed total there (it would be overruled by the counts), so offering one would be a dead end.
+  // The counts are edited on the Revenue tab.
+  const fromCounts = type => type === 'atm' && !isYTD
+    && (otherRevData.atm_from_counts || []).includes(MONTHS[activeMonth - 1]);
+  const editBtn = (type) => (isYTD || fromCounts(type)) ? '' :
     `<button onclick="openOtherRevModal('${type}',event)" style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--muted);line-height:0;border-radius:4px" title="Edit">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
     </button>`;
@@ -6843,7 +6851,9 @@ function applyExpBudgets_(payload, ageMs) {
 }
 
 async function loadOtherRevenue(pre) {   // `pre`: the opening snapshot's answer, if it has one
-  const cached = readCache('otherrev');
+  // The opening snapshot's answer, when there is one, beats this device's own copy: the snapshot is
+  // rebuilt after every ATM write, while the local copy only knows what THIS device last saw.
+  const cached = pre ? null : readCache('otherrev');
   if (cached) { otherRevData = cached; otherRevAgeMs = null; otherRevTried = true; return; }
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return;
@@ -7274,6 +7284,14 @@ async function saveRevModal() {
     if (!revenueDetail[block][month][store]) revenueDetail[block][month][store] = {};
     revenueDetail[block][month][store][item] = value;
     writeCache('rev_detail_v2_' + year, revenueDetail, 3600000);
+    // Net sales carries the ATM total DERIVED from these counts, and the backend sends the new totals
+    // back with the save. Without this the Revenue tab showed the new count while Income kept the old
+    // total until the cache expired. An older backend sends none, and the next load catches up.
+    if (data.otherrev && data.otherrev.atm) {
+      otherRevData = data.otherrev;
+      otherRevAgeMs = null;
+      writeCache('otherrev', data.otherrev);
+    }
     closeOtherRevModal();
     renderRevenue();
   } catch(e) {

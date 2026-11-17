@@ -28,6 +28,8 @@
 <title>Green Cross — Live Dashboard v39</title>
 <!-- v39: Year tabs; historical month caching; Refresh Dutchie data button -->
 <link rel="stylesheet" href="https://greencrosscanna.github.io/greencross-gx-theme/gx-theme.css">
+<!-- gx-handoff.js FIRST: it takes a portal sign-in code (#gxcode=) out of the address bar before anything reads it. -->
+<script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-handoff.js"></script>
 <script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-avatar.js"></script>
 <script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-topnav.js"></script>
 <script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-changelog.js"></script>
@@ -1460,7 +1462,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.620';
+const APP_VERSION = 'v2.621';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -1484,6 +1486,11 @@ const GC_SALES_AUTH = (function() {
   return { save, load, clear, isAuthed };
 })();
 
+// The ONE place a session is written — the password sign-in and the portal hand-off both call it.
+function salesSaveSession_(data) {
+  GC_SALES_AUTH.save({ token: data.token, expiresAt: data.expiresAt, user: data.user, role: data.role,
+                       displayName: data.displayName || '', avatarConfig: data.avatarConfig || null });
+}
 function getToken()  { return (GC_SALES_AUTH.load() || {}).token || ''; }
 function isSky() {
   const s = GC_SALES_AUTH.load() || {};
@@ -10428,8 +10435,7 @@ async function doSalesLogin() {
       // displayName and avatarConfig come back from GXCore.login and were being thrown away, so the
       // header had nothing but a username to show. Keeping them is what lets the shared user chip
       // render a real name and face instead of bare initials.
-      GC_SALES_AUTH.save({ token: data.token, expiresAt: data.expiresAt, user: data.user, role: data.role,
-                           displayName: data.displayName || '', avatarConfig: data.avatarConfig || null });
+      salesSaveSession_(data);
       var userEl = document.getElementById('s-logged-in-user');
       if (userEl) userEl.textContent = 'Signed in as ' + data.user;
       hideLoginScreen();
@@ -10758,6 +10764,14 @@ window.gcShowUpdate = gcShowUpdate; window.gcCheckVersion = gcCheckVersion;
  * data in Settings fixed it every time — because that button calls the one statement the throw had
  * skipped. Ordering alone would have fixed that specific throw; the try/catch is what stops the NEXT
  * decoration from doing the same thing. Painting a name chip is not worth a blank dashboard. */
+// Opened from a staff-portal tile (#gxcode=, already wiped from the address bar by gx-handoff.js):
+// trade it once for this person's normal Sales session and reload signed in. Any refusal leaves the
+// sign-in screen exactly as it is.
+if (window.GXHandoff && GXHandoff.code) GXHandoff.run({
+  app: 'sales',
+  save: salesSaveSession_,
+  current: function () { return (GC_SALES_AUTH.load() || {}).user || null; },
+});
 if (GC_SALES_AUTH.isAuthed()) {
   // Last visit's snapshot on the first frame, labeled as a saved copy — see OPEN_BUNDLE_LS_. Guarded
   // like everything else here: a bad entry on disk must never stop the load below.

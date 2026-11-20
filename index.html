@@ -40,6 +40,8 @@
      further down, where GXCORE exists — and, since v2.559, after gx-client.js has run, so the GX
      Core kv lever is reachable on the first try rather than through the shared 6s poll. -->
 <script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-maintenance.js"></script>
+<!-- Shared joint loading screen (z 9999: under the maintenance gate at 10000 by design). -->
+<script src="https://greencrosscanna.github.io/greencross-gx-theme/gx-jointloader.js?v=1"></script>
 <style>
 :root{
   --bg:var(--gx-bg,#0a0e0d);
@@ -1462,7 +1464,7 @@ body.live-busy .ic-hero-live-dot{animation:bdBlink .6s ease-in-out infinite}
   }
 })();
 
-const APP_VERSION = 'v2.621';
+const APP_VERSION = 'v2.622';
 document.title = `Green Cross — Live Dashboard ${APP_VERSION}`;
 
 const GC_LOGO_PNG = 'https://greencrosscanna.github.io/greencross-gx-theme/gx-logo.png';
@@ -4201,6 +4203,7 @@ async function loadAllStores() {
       // result is the app sitting on "Connecting…" forever with nothing logged and no error shown,
       // because the final render() never runs. A render fault must not be able to kill a data load.
       try { render(); } catch (e) { console.error('[render] progressive paint failed:', e); }
+      try { if (window._gxjFirst_) window._gxjFirst_(); } catch (e) {}   // joint loader: first store is on screen
     });
     await Promise.all(promises);
   }
@@ -10443,7 +10446,8 @@ async function doSalesLogin() {
       document.getElementById('bug-fab').classList.add('visible');
       updateRevVisibility();
       startSalesHeartbeat();
-      loadAllStores();
+      var _c2 = gxCoverStart_();
+      try { _c2.watch(loadAllStores()); } catch (e) { _c2.fail(); throw e; }
       loadWhatsNewSales();
     } else {
       showError(data.error || 'Invalid username or password.');
@@ -10772,12 +10776,40 @@ if (window.GXHandoff && GXHandoff.code) GXHandoff.run({
   save: salesSaveSession_,
   current: function () { return (GC_SALES_AUTH.load() || {}).user || null; },
 });
+/* Joint loading screen (shared gx-jointloader.js) over the first data load. It lifts as soon as the
+ * FIRST store is on screen (so today's number is never held back behind the slowest store) or the load
+ * settles, whichever comes first; it is cancelled outright if the load throws or the script is missing.
+ * Display only: it reads nothing, writes nothing, and never touches the write guard. A hung load is
+ * capped at 45s so the cover can never trap the app. */
+function gxCoverStart_() {
+  var cover = null, closed = false;
+  function finish(ok) {
+    if (closed) return; closed = true; window._gxjFirst_ = null;
+    try { if (cover) { if (ok) cover.done(); else cover.cancel(); } } catch (e) {}
+  }
+  try {
+    if (window.GXJointLoader) {
+      cover = GXJointLoader.screen({ appName: 'Sales' });
+      window._gxjFirst_ = function () { finish(true); };
+      setTimeout(function () { finish(false); }, 45000);
+    }
+  } catch (e) { console.error('[loader] failed to start:', e); cover = null; }
+  return {
+    fail: function () { finish(false); },
+    watch: function (p) {
+      if (p && typeof p.then === 'function') p.then(function () { finish(true); }, function () { finish(false); });
+      else finish(true);
+    }
+  };
+}
 if (GC_SALES_AUTH.isAuthed()) {
   // Last visit's snapshot on the first frame, labeled as a saved copy — see OPEN_BUNDLE_LS_. Guarded
   // like everything else here: a bad entry on disk must never stop the load below.
   try { paintSavedBundle_(); } catch (e) { console.error('[boot] saved snapshot failed to paint:', e); }
   var _bootLoad = null;
-  try { _bootLoad = loadAllStores(); } catch (e) { console.error('[boot] loadAllStores threw synchronously:', e); }
+  var _cover = gxCoverStart_();
+  try { _bootLoad = loadAllStores(); } catch (e) { console.error('[boot] loadAllStores threw synchronously:', e); _cover.fail(); }
+  _cover.watch(_bootLoad);
 
   try {
     var _initSession = GC_SALES_AUTH.load();

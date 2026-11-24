@@ -268,7 +268,10 @@ Tests: `store_dot_blink`, `hero_live_state`, `hero_partial_total`. Hist: "dot BL
   cron outcome is not written, and `fetched_at` does not move on a no-op. `/health` reports what the last
   cron actually DID.
 - Worker auth verdicts — three numbers, each load-bearing: `AUTH_TTL_S` 24h · `AUTH_REFRESH_AFTER_S` 12h
-  · `AUTH_MAX_LIFETIME_MS` 6d (without the cap an EXPIRED token reads from the cache forever). Legacy
+  · `AUTH_MAX_LIFETIME_MS` 29d, just under the 30-day token (without the cap an EXPIRED token reads
+  from the cache forever). The cap counts from first sight, not from minting, so **`tokenExpired`
+  also refuses the cache to any token whose own expiry has passed** — move the cap with
+  `GC_SESSION_TTL_MS`. Legacy
   `'ok'` verdicts are honored. The re-stamp is the only KV WRITE on the request path, which is why it is
   twelve hours and not every open. **A verification TIMEOUT is never cached as a refusal.** The TTL is
   asserted as a LOWER BOUND, never an equality — the number may be tuned, the property may not. Accepted cost (Sky's call, 2026-10-05): a revoked person can read the cached
@@ -488,7 +491,8 @@ bash gxsalesprobe.sh authprobe
 - **SIGN-IN IS GX CORE ONLY, AND RENEWAL RE-CHECKS THE GRANT** (v2.594, Sky's call). No local-login
   fallback, **including for a Core outage** — don't re-add a "temporary" one. `pingSession_` refuses when
   `roleForApp` answers null and **still renews on a Core ERROR**. *Not closed:* a copied token reads until
-  its 7-day expiry. The `gc_sales_users` property is unread; deleting it is safe.
+  its 30-day expiry (`GC_SESSION_TTL_MS`; 7 until 2026-11-23, raised by Sky: "my computers are private,
+  30 days is okay"). The `gc_sales_users` property is unread; deleting it is safe.
 
 Tests: `write_guard`, `login_core_only`. Hist: "The write guard" · "admit tests"
 

@@ -325,20 +325,57 @@ async function main() {
     }
 
     {
-      /* A chain of re-stamps must not outlive the credential. A session token lives 7 days; a
-       * verdict first granted 7 days ago has to go back and ask, or an EXPIRED token would read
-       * from this cache forever — a new hole, not a longer one. */
+      /* A chain of re-stamps must not outlive the credential. A session token lives 30 days (7
+       * until 2026-11-23); a verdict first granted longer ago than that has to go back and ask, or
+       * an EXPIRED token would read from this cache forever — a new hole, not a longer one. */
       const kv = fakeKV({ 'bundle:v1': FRESH() });
       const calls = scriptedFetch([{ body: { ok: true } }, { body: { ok: false, error: 'Invalid session' } }]);
       const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
       await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
       const key = authKey(kv);
-      const weekAgo = Date.now() - 7 * 86400 * 1000;
-      kv._raw.set(key, JSON.stringify({ ok: 1, first: weekAgo, last: Date.now() }));
+      const pastTokenLife = Date.now() - 31 * 86400 * 1000;
+      kv._raw.set(key, JSON.stringify({ ok: 1, first: pastTokenLife, last: Date.now() }));
 
       const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
       ok('a verdict older than the token itself is re-verified, not trusted', calls.length === 2);
       ok('...and Sales refusing it now refuses the read', res.status === 401);
+    }
+
+    {
+      /* The cap counts from when the cache FIRST SAW a token, not from when it was minted — so on
+       * its own it lets a token first seen late in its life read here well past its expiry. A token
+       * whose own expiry has passed must never read from the cache, however fresh its verdict. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }, { body: { ok: false, error: 'Session expired' } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      const SOON = 'sky:' + (Date.now() + 60000) + ':sig';
+      await worker.fetch(new Request('https://w/bundle?t=' + SOON), env, {});
+      const key = authKey(kv);
+      const realNow = Date.now;
+      const later = realNow() + 120000;
+      Date.now = () => later;            // the token's own expiry is now behind us
+      let res;
+      try {
+        kv._raw.set(key, JSON.stringify({ ok: 1, first: later - 60000, last: later - 60000 }));
+        res = await worker.fetch(new Request('https://w/bundle?t=' + SOON), env, {});
+      } finally { Date.now = realNow; }
+      ok('an EXPIRED token with a fresh verdict is re-verified, not served from the cache', calls.length === 2);
+      ok('...and Sales refusing it refuses the read', res.status === 401);
+    }
+
+    {
+      /* The cap must not cut a live session short: a verdict a few weeks old, on a token still
+       * inside its 30-day life, opens from the cache with no hop. Lower bound, not an equality. */
+      const kv = fakeKV({ 'bundle:v1': FRESH() });
+      const calls = scriptedFetch([{ body: { ok: true } }]);
+      const env = { GX: kv, GX_DEPLOY_SECRET: 's' };
+      await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      const key = authKey(kv);
+      const threeWeeks = Date.now() - 21 * 86400 * 1000;
+      kv._raw.set(key, JSON.stringify({ ok: 1, first: threeWeeks, last: Date.now() }));
+      const res = await worker.fetch(new Request('https://w/bundle?t=' + TOKEN), env, {});
+      ok('a three-week-old verdict on a live token still opens from the cache (cap >= 21d)',
+        res.status === 200 && calls.length === 1);
     }
 
     {

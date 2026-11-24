@@ -591,7 +591,10 @@ function probeMark_(label, ms, extra) {
 // Tokens are signed with GC_SESSION_SECRET (shared across the suite) so a token
 // issued by GXCore.login() validates identically in requireAuth_() here.
 const GC_SESSION_SECRET_KEY = 'GC_SESSION_SECRET'; // MUST match GXCore + Inventory
-const GC_SESSION_TTL_MS     = 7 * 24 * 60 * 60 * 1000; // 7 days
+// 30 days, raised from 7 on 2026-11-23 by Sky: "my computers are private, 30 days is okay". GX Core
+// moves its own sign-in tokens to 30 days separately; this one is what every 10-minute renewal mints.
+// The Worker's AUTH_MAX_LIFETIME_MS (worker/src/index.js) is set just under this — move them together.
+const GC_SESSION_TTL_MS     = 30 * 24 * 60 * 60 * 1000; // 30 days
 // gc_sales_users (the old local password store) is no longer read for sign-in — see loginUser. The
 // key stays named so authprobe can report a leftover property rather than it being forgotten.
 const GC_USERS_KEY          = 'gc_sales_users';
@@ -628,7 +631,7 @@ function validateSessionToken_(token) {
 // ── Write-auth grant re-check — SHIPPED DARK ON PURPOSE ──────────────────────────
 // THE GAP: validateSessionToken_ checks a signature and an expiry, never a GRANT. A token proves who
 // you are, not that you still have access, so revoking someone in the shared user list leaves them
-// able to write here for the remainder of a SEVEN DAY TTL. Core's roleForApp (public in v170) closes
+// able to write here for the remainder of the token's TTL (seven days when written; 30 since 2026-11-23). Core's roleForApp (public in v170) closes
 // that — it is superadmin-aware, filters on status, and invalidates on revoke, so a revocation bites
 // in a minute instead of waiting out the token.
 //
@@ -759,8 +762,8 @@ function loginUser(params) {
 }
 
 // SESSION RENEWAL RE-CHECKS THE GRANT. The client pings every 10 minutes and each ping minted a fresh
-// 7-day token from nothing but a valid signature — so someone removed in the Command Center stayed
-// signed in for as long as a tab stayed open. A definitive "no Sales role" now refuses the renewal and
+// full-length token (GC_SESSION_TTL_MS) from nothing but a valid signature — so someone removed in
+// the Command Center stayed signed in for as long as a tab stayed open. A definitive "no Sales role" now refuses the renewal and
 // the client signs out. A GX Core ERROR still renews: failing this closed would sign everyone out during
 // a Core hiccup, and writes are separately failed closed by writeGuard_.
 function pingSession_(params) {

@@ -56,9 +56,18 @@ const BUNDLE_MAX_AGE_S = 3600;         // refuse to serve a snapshot older than 
  *                KV WRITE on the request path, and writes are the scarce resource here (1,000/day;
  *                see `record`) — at twelve hours that is ~2/day per viewer, not one per open.
  *   MAX_LIFETIME a chain of re-stamps must never outlive the credential it was granted for. A
- *                session token lives 7 days, so at 6 days this stops re-stamping and goes back and
- *                asks Sales. Without it an EXPIRED token would read from this cache forever, which
- *                is a new hole rather than a longer one.
+ *                session token lives 30 days (Sky, 2026-11-23: "my computers are private, 30 days
+ *                is okay" — it was 7), so at 29 days this stops re-stamping and goes back and asks
+ *                Sales. Without it an EXPIRED token would read from this cache forever, which is a
+ *                new hole rather than a longer one.
+ *
+ *                The cap alone never fully closed that: it counts from when THIS cache first saw
+ *                the token, not from when the token was minted, so a token first seen late in its
+ *                life could read here for up to the cap past its own expiry (6 days at 7/6; 29 at
+ *                30/29). `tokenExpired` closes it directly — a token whose own expiry has passed
+ *                never reads from the cache. The expiry is inside the signed payload and the cache
+ *                key is a hash of the whole token, so it cannot be edited without missing the
+ *                cache. The cap stays as the backstop for a token whose expiry cannot be read.
  *
  * WHAT THIS COSTS, said plainly: a revoked person can read the cached snapshot for up to a day
  * after the grant is pulled. It is read-only, it is no wider than the token's own signature already
@@ -67,7 +76,7 @@ const BUNDLE_MAX_AGE_S = 3600;         // refuse to serve a snapshot older than 
  * on 2026-10-05 with that tradeoff in front of him. */
 const AUTH_TTL_S            = 86400;        // 24h — a stamp must survive a closed phone overnight
 const AUTH_REFRESH_AFTER_S  = 43200;        // 12h — re-stamp a verdict in active use
-const AUTH_MAX_LIFETIME_MS  = 6 * 86400000; // 6d  — then re-ask Sales; tokens only live 7
+const AUTH_MAX_LIFETIME_MS  = 29 * 86400000; // 29d — then re-ask Sales; tokens only live 30
 
 /* Growing timeouts, not a flat one, for the reason gxdevlogin.sh spells out: the two-hop /exec has
  * a cheap fast bounce AND a cold-instance stall of tens of seconds. One number cannot serve both.
@@ -96,7 +105,8 @@ async function fetchJson(url, timeoutMs) {
 
 /* The Worker's own identity: a READ-ONLY viewer session minted from GX Core with the deploy secret,
  * exactly as gxdevlogin.sh does. Viewer fails roleCanEdit, so even a total compromise of this Worker
- * cannot write to anything. Tokens last 7 days; this re-mints on a miss or a 401. */
+ * cannot write to anything. Core sets the token's life (7 days when written, moving to 30); this
+ * re-mints on a miss, a 401, or an hour before the expiry Core reports. */
 async function serviceToken(env, force, trace) {
   if (!force) {
     const held = await env.GX.get(KV_SESSION, 'json');
@@ -114,7 +124,7 @@ async function serviceToken(env, force, trace) {
     if (r && r.ok && r.token) {
       /* dev_session returns `expiresAt` as a STRING, not an epoch. An unparseable one must not
        * become NaN — NaN > anything is false, which would re-mint on every single tick forever.
-       * Fall back to 6 days, comfortably inside the 7-day token life. */
+       * Fall back to 6 days, comfortably inside the token life whether Core mints 7 or 30. */
       const parsed = Date.parse(r.expiresAt || '');
       await env.GX.put(KV_SESSION, JSON.stringify({
         token: r.token,
@@ -223,6 +233,17 @@ async function refresh(env, force) {
 /* Verify a VIEWER's token by asking Sales, with the verdict cached for AUTH_TTL_S.
  * ?action=ping is the cheapest authenticated route and is what the client already calls every
  * 10 minutes, so this reuses a path that is known to work rather than inventing a check. */
+/* A session token is `user:expiryMs:signature`. True only when that expiry is READABLE and PAST —
+ * an unreadable one is not called expired here (Sales decides that; MAX_LIFETIME bounds the cache).
+ * Read for the cache only: it never admits anything, it only sends an expired token back to Sales,
+ * which refuses it. */
+function tokenExpired(token) {
+  const parts = String(token).split(':');
+  if (parts.length !== 3) return false;
+  const exp = Number(parts[1]);
+  return Number.isFinite(exp) && exp > 0 && Date.now() > exp;
+}
+
 async function authorized(env, token) {
   if (!token) return false;
   /* Key on a hash, never the token itself: KV keys show up in dashboards and logs. */
@@ -240,7 +261,7 @@ async function authorized(env, token) {
   };
 
   const cached = await env.GX.get(key);
-  if (cached) {
+  if (cached && !tokenExpired(token)) {
     /* `'ok'` is what the 10-minute version wrote. It parses as nothing, so treat it as verified with
      * an unknown history and re-stamp it from now — otherwise every entry written before this change
      * would sit unrecognized and re-verify on every single request. */

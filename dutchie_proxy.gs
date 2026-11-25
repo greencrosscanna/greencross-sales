@@ -993,6 +993,22 @@ function doGet(e) {
     }
   }
 
+  // The settled-days data source switch — see settledSalesRows_. Secret-gated, read with no `set`.
+  // `set=api` reads past days from gx-api (Cloudflare); `set=sheets` is the rollback, no deploy.
+  if (params.action === 'datasource') {
+    const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
+    if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
+    const props = PropertiesService.getScriptProperties();
+    const was = salesDataSource_();
+    if (params.set) {
+      const want = String(params.set).trim().toLowerCase();
+      if (SALES_DATA_SOURCES_.indexOf(want) === -1) return jsonOut_({ ok: false, error: 'set must be one of ' + SALES_DATA_SOURCES_.join(', '), got: want });
+      props.setProperty(SALES_DATA_SOURCE_PROP_, want);
+      return jsonOut_({ ok: true, app: 'sales', was: was, now: salesDataSource_() });
+    }
+    return jsonOut_({ ok: true, app: 'sales', now: was });
+  }
+
   // Heartbeat: renew a still-valid token to extend the session
   // ── pnlprobe — exercise the P&L path in the LIVE Apps Script runtime, without a session ──────
   // The `pnl` action sits behind the session gate, so the only way to run it is to be signed in with
@@ -1458,8 +1474,70 @@ function doPost(e) {
 }
 
 // ── GX Core sales cache + live Dutchie split ──────────────────────────────────
-// Settled days (yesterday and earlier) come from GXCore.getSalesDaily — fast,
-// no Dutchie quota.  Today (intraday) still uses a live Dutchie transaction pull.
+// Settled days (yesterday and earlier) come from settledSalesRows_ — GX Core's Sheets cache by
+// default, or gx-api when the switch says so. Today (intraday) still uses a live Dutchie pull.
+
+/* ─── WHERE PAST DAYS COME FROM: the gx-api switch (roadmap [5]) ─────────────────────────────────
+ *
+ * gx-api (greencross-command-center/api/) is a Cloudflare Worker + database that pulls the same
+ * Dutchie Closing Report GX Core does and checks itself against GX Core's Sheets cache to the cent
+ * every morning. This switch lets Sales read from it.
+ *
+ *   SALES_DATA_SOURCE unset or 'sheets'   GXCore.getSalesDaily, exactly as before (the default)
+ *   SALES_DATA_SOURCE = 'api'             gx-api, falling back to GXCore.getSalesDaily on ANY doubt
+ *
+ * Flip it with ?action=datasource&set=api|sheets&secret=… — no deploy, so the rollback is one call.
+ *
+ * THE FALLBACK IS THE SAFETY PROPERTY. These numbers are checked against bank deposits, and the
+ * failure this file already has scars from is a per-store problem degrading into a SMALLER number
+ * rather than an error. So gx-api's answer is used only when it is a 200, says ok, and has a row for
+ * EVERY day asked about. A short answer (a day the backfill has not reached, a store before it
+ * opened) falls back to Sheets for that call rather than summing fewer days. A network error, a
+ * timeout or a bad shape falls back too. Each fallback leaves a probe mark naming why.
+ *
+ * Asked only for ONE store. An all-stores read has no simple completeness check, so it stays on
+ * Sheets. */
+const GX_API_ = 'https://gx-api.greencross.workers.dev';
+const SALES_DATA_SOURCE_PROP_ = 'SALES_DATA_SOURCE';
+const SALES_DATA_SOURCES_ = ['sheets', 'api'];
+
+function salesDataSource_() {
+  let v = '';
+  try { v = String(PropertiesService.getScriptProperties().getProperty(SALES_DATA_SOURCE_PROP_) || '').trim().toLowerCase(); }
+  catch (e) { v = ''; }   // an unreadable switch is the safe default, never a failed read
+  return v === 'api' ? 'api' : 'sheets';   // anything unrecognized is the safe default
+}
+
+function daysInclusive_(from, to) {
+  const a = from.split('-').map(Number), b = to.split('-').map(Number);
+  return Math.round((Date.UTC(b[0], b[1] - 1, b[2]) - Date.UTC(a[0], a[1] - 1, a[2])) / 86400000) + 1;
+}
+
+function settledSalesRows_(store, from, to) {
+  if (store && salesDataSource_() === 'api') {
+    const t0 = Date.now();
+    try {
+      const url = GX_API_ + '/v1/sales/daily?store=' + encodeURIComponent(store)
+        + '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+      const resp = UrlFetchApp.fetch(url, { headers: { 'x-gx-secret': gxDeploySecret_() }, muteHttpExceptions: true });
+      const code = resp.getResponseCode();
+      if (code === 200) {
+        const body = JSON.parse(resp.getContentText() || 'null');
+        const want = daysInclusive_(from, to);
+        if (body && body.ok === true && Array.isArray(body.rows) && body.rows.length >= want) {
+          probeMark_('settled_source_api', Date.now() - t0, { days: body.rows.length });
+          return body.rows;
+        }
+        probeMark_('settled_api_fallback', Date.now() - t0, { why: 'short_or_bad', got: body && body.rows ? body.rows.length : null, want: want });
+      } else {
+        probeMark_('settled_api_fallback', Date.now() - t0, { why: 'http_' + code });
+      }
+    } catch (e) {
+      probeMark_('settled_api_fallback', Date.now() - t0, { why: errText_(e) });
+    }
+  }
+  return GXCore.getSalesDaily(store, from, to) || [];
+}
 
 function getStoreSales_(store, from, to, nocache, phase, maxage) {
   try {
@@ -1504,7 +1582,7 @@ function getStoreSales_(store, from, to, nocache, phase, maxage) {
       } else {
         try {
           const _t1 = Date.now();
-          cacheRows = GXCore.getSalesDaily(store, fromDate, settledTo) || [];
+          cacheRows = settledSalesRows_(store, fromDate, settledTo);
           probeMark_('settled_getSalesDaily', Date.now() - _t1, { days: cacheRows.length });
           // 1-hour TTL (was 4h): getSalesDaily is authoritative + cheap, so retroactive returns / re-pull
           // corrections to settled days surface within the hour instead of lingering.
@@ -2813,7 +2891,7 @@ function attainProbe_(start, end) {
   for (const s of salesStores_()) {
     netByStore[s.sales] = {};
     try {
-      const rows = GXCore.getSalesDaily(s.dutchie, spanFrom, spanTo) || [];
+      const rows = settledSalesRows_(s.dutchie, spanFrom, spanTo);
       for (const r of rows) {
         if (!r.date) continue;
         netByStore[s.sales][String(r.date).slice(0, 10)] = Number(r.net || 0);
@@ -4110,7 +4188,7 @@ function getCogsDutchie(params) {
     let storeOk = true;
     try {
       // Settled days via sales_daily cache (sourced from Dutchie Closing Report, nightly)
-      const rows = GXCore.getSalesDaily(dutchie, from, settledTo) || [];
+      const rows = settledSalesRows_(dutchie, from, settledTo);
       for (const r of rows) {
         if (!r.date) continue;
         results.push({ date: String(r.date).slice(0, 10), store: sales, cogs: Number(r.cogs || 0) });

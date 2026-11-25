@@ -114,7 +114,10 @@ vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
    runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
 vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
 vm.runInContext(MAP_SRC[0] + '\n' + CAP_SRC[0] + '\n' + grab(GS, 'hasOwn_') + '\n' + grab(GS, 'salesStoreKey_') + '\n' +
-                 grab(GS, 'salesStores_') + '\n' + grab(GS, 'attainProbe_'), ctx);
+                 grab(GS, 'salesStores_') + '\n' +
+                 // settledSalesRows_ + the gx-api switch: with no switch set it calls GXCore.getSalesDaily.
+                 GS.slice(GS.indexOf('const GX_API_ ='), GS.indexOf('function getStoreSales_(')) + '\n' +
+                 grab(GS, 'attainProbe_'), ctx);
 
 // ── Input validation ──────────────────────────────────────────────────────────────────────────
 const bad = vm.runInContext('attainProbe_("2026-8-1", "2026-08-31")', ctx);

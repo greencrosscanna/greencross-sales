@@ -45,6 +45,9 @@ function grabFrom(src, file, name) {
   return src.slice(m.index, j + 1);
 }
 const gs   = n => grabFrom(GS,   'dutchie_proxy.gs', n);
+/* The settled-days source (settledSalesRows_ and the gx-api switch it reads), lifted whole: every
+   settled read now goes through it. With no switch set it calls GXCore.getSalesDaily, as before. */
+const SETTLED_SRC = GS.slice(GS.indexOf('const GX_API_ ='), GS.indexOf('function getStoreSales_('));
 const html = n => grabFrom(HTML, 'index.html',       n);
 
 /* This file's body is an async IIFE, and an await that never settles ends the process quietly with
@@ -87,7 +90,7 @@ console.log('\n1. phase decides which halves are FETCHED, not merely which are r
       jsonOut_: o => ({ getContent: () => JSON.stringify(o), _o: o }),
     };
     vm.createContext(ctx);
-    vm.runInContext(gs('getStoreSales_'), ctx);
+    vm.runInContext(SETTLED_SRC + '\n' + gs('getStoreSales_'), ctx);
     const out = ctx.getStoreSales_('Bend', '2026-09-01', '2026-09-11', undefined, phase)._o;
     return { out, settledReads, liveReads };
   }

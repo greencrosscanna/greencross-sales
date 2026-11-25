@@ -83,6 +83,9 @@ function grabFrom(src, file, name) {
   return src.slice(m.index, j + 1);
 }
 const gs   = n => grabFrom(GS,   'dutchie_proxy.gs', n);
+/* The settled-days source (settledSalesRows_ and the gx-api switch it reads), lifted whole: every
+   settled read now goes through it. With no switch set it calls GXCore.getSalesDaily, as before. */
+const SETTLED_SRC = GS.slice(GS.indexOf('const GX_API_ ='), GS.indexOf('function getStoreSales_('));
 const html = n => grabFrom(HTML, 'index.html',       n);
 
 /* A section whose subject does not exist yet must REPORT, not die. Proving a gate against the bug
@@ -225,7 +228,7 @@ vm.createContext(gctx);
 vm.runInContext(
   (mDeadline ? mDeadline[0].trim() + '\n' : '') +
   (mBudget   ? mBudget[0].trim()   + '\n' : '') +
-  [gs('gxDeploySecret_'), gs('gxRetryHold_'), gs('gxCoreRoute_'),
+  [SETTLED_SRC, gs('gxDeploySecret_'), gs('gxRetryHold_'), gs('gxCoreRoute_'),
    gs('cacheGet_'), gs('cacheSet_'), gs('dayBefore_'), gs('getCogsDutchie')].join('\n'),
   gctx);
 

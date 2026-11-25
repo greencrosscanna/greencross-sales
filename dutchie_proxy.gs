@@ -1539,6 +1539,79 @@ function settledSalesRows_(store, from, to) {
   return GXCore.getSalesDaily(store, from, to) || [];
 }
 
+/* ─── TODAY FROM gx-api — same switch, same rule: any doubt goes back to the old path ────────────
+ *
+ * Slice 4 of roadmap [5]. With SALES_DATA_SOURCE = 'api', today's figure comes from gx-api's
+ * /v1/sales/today: Dutchie's Closing Report for today, which gx-api pulls straight from Dutchie
+ * (about a second) when its copy is older than we asked for — instead of a transaction pull through
+ * GX Core's /exec hop (3–50s, measured). Unset or 'sheets': nothing here runs.
+ *
+ * Returns { <label>: today-shaped answer } for ONLY the stores whose answer passes every check; a
+ * store missing from the result takes the old GX Core path, so the caller never sees a gap. A store's
+ * answer is refused when it is not ok, is `stale` (gx-api's pull failed and it only has an older
+ * copy), is not for today's LA date, is older than asked, has a non-number in a money field, or
+ * reads ZERO orders during store hours — a blank day is the failure we will not show as a number.
+ *
+ * The shape is dtodayFromRows_'s, so everything downstream (cache entry, snapshot, totals) is
+ * unchanged. `as_of` is when gx-api actually pulled it, never when we asked — an honest age.
+ * topProducts is [] — it is [] on the old path too (Dutchie line items carry no product name). */
+const GX_API_TODAY_MIN_AGE_S_ = 30;   // gx-api's own floor; asking for less gets 30
+
+function todayViaApi_(labels, maxAgeS, todayPT) {
+  const out = {};
+  if (!labels || !labels.length || salesDataSource_() !== 'api') return out;
+  const want = Math.max(GX_API_TODAY_MIN_AGE_S_, Math.floor(Number(maxAgeS) || 0));
+  const t0 = Date.now();
+  let body = null;
+  try {
+    const url = GX_API_ + '/v1/sales/today?stores=' + encodeURIComponent(labels.join(',')) + '&maxage=' + want;
+    const resp = UrlFetchApp.fetch(url, { headers: { 'x-gx-secret': gxDeploySecret_() }, muteHttpExceptions: true });
+    const code = resp.getResponseCode();
+    if (code !== 200) { probeMark_('today_api_fallback', Date.now() - t0, { why: 'http_' + code, stores: labels.length }); return out; }
+    body = JSON.parse(resp.getContentText() || 'null');
+  } catch (e) {
+    probeMark_('today_api_fallback', Date.now() - t0, { why: errText_(e), stores: labels.length });
+    return out;
+  }
+  if (!body || body.ok !== true || !body.stores || typeof body.stores !== 'object') {
+    probeMark_('today_api_fallback', Date.now() - t0, { why: 'bad_shape', stores: labels.length });
+    return out;
+  }
+  const inHours = bgInStoreHours_(new Date());
+  labels.forEach(function (label) {
+    const why = todayApiRefusal_(body.stores[label], todayPT, want, inHours);
+    if (why) { probeMark_('today_api_fallback', Date.now() - t0, { store: label, why: why }); return; }
+    const r = body.stores[label].row;
+    const c = function (v) { return Math.round(Number(v) * 100) / 100; };
+    out[label] = {
+      netSales: c(r.net), grossSales: c(r.gross), discounts: c(r.discount), cost: c(r.cogs), tax: c(r.tax),
+      orders: Number(r.orders), topProducts: [],
+      daily: [{ date: todayPT, netSales: c(r.net), grossSales: c(r.gross), orders: Number(r.orders),
+                discounts: c(r.discount), cogs: c(r.cogs), tax: c(r.tax) }],
+      as_of: Date.parse(r.updated_at), source: 'gx-api',
+    };
+    probeMark_('today_source_api', Date.now() - t0, { store: label, age_s: body.stores[label].age_s });
+  });
+  return out;
+}
+
+/* '' when gx-api's answer for one store can be shown as today's figure, else why not. */
+function todayApiRefusal_(e, todayPT, maxAgeS, inStoreHours) {
+  if (!e || e.ok !== true || !e.row) return (e && e.error) || 'no_answer';
+  if (e.stale) return 'stale' + (e.error ? ': ' + e.error : '');
+  const r = e.row;
+  if (r.date !== todayPT) return 'not_today';
+  const asOf = Date.parse(r.updated_at);
+  if (!isFinite(asOf)) return 'no_pull_time';
+  if (Date.now() - asOf > maxAgeS * 1000 + 5000) return 'too_old';   // 5s grace for the trip back
+  const fields = ['net', 'gross', 'discount', 'tax', 'cogs', 'orders'];
+  for (let i = 0; i < fields.length; i++) {
+    if (r[fields[i]] === null || r[fields[i]] === '' || !isFinite(Number(r[fields[i]]))) return 'bad_' + fields[i];
+  }
+  if (inStoreHours && Number(r.orders) === 0) return 'zero_orders_in_store_hours';
+  return '';
+}
+
 function getStoreSales_(store, from, to, nocache, phase, maxage) {
   try {
     /* PHASE SPLITS THE FAST HALF OFF FROM THE FRAGILE ONE.
@@ -1845,8 +1918,9 @@ function dutchieTodayFetch_(store, todayPT, toISO, nocache, maxAgeS) {
   const t0 = Date.now();
   try { CACHE.put(flightKey, String(t0), DTODAY_FLIGHT_TTL_); } catch (e) {}
   try {
-    const out = dutchieTodayFetchLive_(store, todayPT, toISO);
-    out.as_of = t0;
+    const out = dutchieTodayFetchLive_(store, todayPT, toISO, nocache ? 0 : maxAgeMs / 1000);
+    // gx-api's answer carries when IT pulled; only the old path's figure is stamped with our start.
+    if (!out.as_of) out.as_of = t0;
     try { cacheSet_(liveCacheKey, JSON.stringify(out), DTODAY_KEEP_S_); } catch (e) {}
     return out;
   } finally {
@@ -1972,7 +2046,7 @@ function bgRefreshToday_(force) {
   }
   const todayPT = Utilities.formatDate(now, 'America/Los_Angeles', 'yyyy-MM-dd');
   const toISO   = now.toISOString();
-  const due = [];
+  let due = [];
   salesStores_().forEach(function (st) {
     const key = dtodayKey_(st.sales, todayPT);
     const age = dtodayAgeS_(key);
@@ -1991,6 +2065,28 @@ function bgRefreshToday_(force) {
 
   if (due.length) {
     due.forEach(function (d) { try { CACHE.put(d.key + '__inflight', String(t0), DTODAY_FLIGHT_TTL_); } catch (e) {} });
+  }
+  /* Switch on: ONE gx-api call for every due store first. Each store it vouches for is cached and
+     done; the rest go down the GX Core path below exactly as before. Switch off: an empty answer,
+     no call made. */
+  if (due.length && salesDataSource_() === 'api') {
+    let api = {};
+    try { api = todayViaApi_(due.map(function (d) { return d.store; }), BG_REFRESH_STALE_S_, todayPT); } catch (e) { api = {}; }
+    due = due.filter(function (d) {
+      const out = api[d.store];
+      if (!out) return true;
+      try {
+        cacheSet_(d.key, JSON.stringify(out), DTODAY_KEEP_S_);
+        summary.stores[d.store] = { pulled: true, net: out.netSales, via: 'gx-api' };
+        summary.pulled++;
+      } catch (e) {
+        return true;   // could not cache it: let the old path try
+      }
+      try { CACHE.remove(d.key + '__inflight'); } catch (e) {}
+      return false;
+    });
+  }
+  if (due.length) {
     let resps = null, batchErr = '';
     try {
       resps = UrlFetchApp.fetchAll(due.map(function (d) {
@@ -2328,7 +2424,10 @@ function bundleStatus_() {
   };
 }
 
-function dutchieTodayFetchLive_(store, todayPT, toISO) {
+function dutchieTodayFetchLive_(store, todayPT, toISO, maxAgeS) {
+  // Switch on: gx-api first (see todayViaApi_); a store it cannot vouch for takes the old path below.
+  const viaApi = todayViaApi_([store], maxAgeS, todayPT)[store];
+  if (viaApi) return viaApi;
   return dtodayFromRows_(gxDutchieGet_(store, DTODAY_PATH_, dtodayQuery_(todayPT, toISO)), todayPT);
 }
 
@@ -4174,6 +4273,12 @@ function getCogsDutchie(params) {
   const answered     = [];
   const missing      = [];
   const missingWhy   = {};
+  /* Switch on: today's COGS for every store in ONE gx-api call (600s: this route caches 10 minutes
+     anyway). A store it cannot vouch for asks GX Core below, exactly as before. Switch off: {}. */
+  let todayApi = {};
+  if (includesToday) {
+    try { todayApi = todayViaApi_(STORES.map(function (s) { return s.dutchie; }), DTODAY_SNAPSHOT_S_, todayPT); } catch (e) { todayApi = {}; }
+  }
   const loopStarted  = Date.now();
   for (const { dutchie, sales } of STORES) {
     /* THE DEADLINE IS THE LOOP'S, NOT THE CALL'S — see COGS_LOOP_DEADLINE_MS. Checked here, before
@@ -4194,7 +4299,9 @@ function getCogsDutchie(params) {
         results.push({ date: String(r.date).slice(0, 10), store: sales, cogs: Number(r.cogs || 0) });
       }
       // Today: call Closing Report directly — returns live intra-day COGS (a valid partial, not an error)
-      if (includesToday) {
+      if (includesToday && todayApi[dutchie]) {
+        results.push({ date: todayPT, store: sales, cogs: todayApi[dutchie].cost });
+      } else if (includesToday) {
         try {
           // Through the route: this reads Dutchie, so it needs GX Core's own context.
           const crr = gxCoreRoute_('dutchie_closing_report', { store: dutchie, date: todayPT });

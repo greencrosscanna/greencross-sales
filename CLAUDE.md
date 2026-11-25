@@ -293,7 +293,14 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
 - Flip: `?action=datasource&set=api|sheets&secret=…` (no `set` reads it). No deploy; `sheets` is
   the rollback. Only after gx-api's `/v1/health` shows 14 clean days AND Sky says so.
 
-Tests: `gx_api_settled`.
+- **Today too (slice 4, 2026-11-25), same switch:** `todayViaApi_` asks gx-api's `/v1/sales/today`
+  (the Closing Report, pulled by the Worker when older than the caller's age) for the viewer's live
+  pull (`dutchieTodayFetchLive_`), the background refresh (one call for all due stores) and today's
+  COGS. A store is refused — and takes the old GX Core path — when not ok, `stale`, not today, older
+  than asked, a non-number, or **zero orders during store hours**. `as_of` is gx-api's pull time,
+  never ours. Switch off: no request is made.
+
+Tests: `gx_api_settled`, `gx_api_today`, `bg_refresh` (switch-on section).
 
 ## `/exec` stalls — Google's hop, not ours
 

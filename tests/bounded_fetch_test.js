@@ -163,9 +163,14 @@ const SECTION_1 = () => section('1. EVERY fetch IN index.html PASSES AN AbortSig
      milliseconds or is not there. Worse, putting it in the pool would make it QUEUE behind the
      very /exec requests it exists to avoid — the shortcut waiting on the thing it replaces. It
      carries its own AbortController and a single short ceiling, and every failure returns null so
-     the caller falls through to the pooled /exec path unchanged. */
-  ok('exactly five raw fetch sites, the ones this file knows about',
-     sites.length === 5, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
+     the caller falls through to the pooled /exec path unchanged.
+
+     THE SIXTH, lbGoalsFromApi_ (2026-11-25, roadmap [5] slice 5), is outside the pool for the same
+     reason: it reads gx-api (Cloudflare), runs only when the backend's switch says 'api', carries
+     its own AbortController with one 8s ceiling, and returns null on anything else so
+     fetchPublishedGoals goes on to GX Core unchanged. */
+  ok('exactly six raw fetch sites, the ones this file knows about',
+     sites.length === 6, 'found ' + sites.length + ' at lines ' + sites.map(s => s.line).join(', ') +
      ' — a new one is not necessarily wrong, but it is a decision, so say so here.');
 });
 

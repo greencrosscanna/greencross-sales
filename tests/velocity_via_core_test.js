@@ -47,6 +47,7 @@ function backend(getVelocity, cache) {
   /* The REAL scrub, not a stub: every exception this suite drives now also proves the
      credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
   vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GXCore)
   vm.runInContext([grab(GS, 'hasOwn_'), /const VELOCITY_CACHE_KEY_ = [^\n]*/.exec(GS)[0], grab(GS, 'getVelocity_'),
                    'this.getVelocity_ = getVelocity_;'].join('\n'), ctx);
   return ctx;

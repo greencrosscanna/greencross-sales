@@ -64,6 +64,7 @@ const LEDGER = {
 function ctxWith(fns, extra) {
   const ctx = Object.assign({ console, jsonOut_: o => o }, extra || {});
   vm.createContext(ctx);
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GXCore)
   fns.forEach(n => vm.runInContext(grab(n), ctx));
   return ctx;
 }

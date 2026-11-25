@@ -1876,7 +1876,46 @@ function lbGoalsIsCurrentMonth(p, curMonth, curYear) {
  * targets with no error anywhere — hence the two guards below. Returns null (never throws)
  * so the caller falls through to the direct fetch.
  */
+/* THE SWITCH, AS THE BROWSER LEARNS IT. The backend's SALES_DATA_SOURCE (roadmap [5]) rides on the
+   ?action=stores reply. Until that reply lands, and whenever it says anything but 'api', this is
+   'sheets' and nothing below talks to gx-api. */
+let _salesDataSource = 'sheets';
+const GX_API_URL = 'https://gx-api.greencross.workers.dev';
+
+/* Leaderboard's published goals from gx-api's verbatim copy of GX Core's published_goals (slice 5).
+   The SAME two guards as the Core path, with the copy's own age ADDED to the payload's — a copy taken
+   20 minutes ago of a payload 10 minutes old is 30 minutes old. null (never a throw) on anything else,
+   so the caller goes on to GX Core exactly as before. One attempt, 8s: it is the step in FRONT of the
+   proven path, and must never be the reason that path starts late. */
+async function lbGoalsFromApi_(curMonth, curYear) {
+  if (_salesDataSource !== 'api') return null;
+  const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 8000) : null;
+  try {
+    const res = await fetch(`${GX_API_URL}/v1/core/mirror?keys=published_goals:performance`,
+      { headers: { Authorization: 'Bearer ' + getToken() }, signal: ctl ? ctl.signal : undefined });
+    if (!res.ok) { console.warn('[lb-goals] gx-api answered HTTP ' + res.status + ' — falling back'); return null; }
+    const b = await res.json();
+    const part = b && b.ok && b.parts && b.parts['published_goals:performance'];
+    const r = part && part.body;
+    if (!r || !r.ok || !r.payload) { console.warn('[lb-goals] gx-api has no copy — falling back'); return null; }
+    const age = Number(r.age_minutes) + Number(part.age_s) / 60;
+    if (!isFinite(age) || age > LB_GOALS_MAX_AGE_MIN) { console.warn(`[lb-goals] gx-api copy stale (${age} min) — falling back`); return null; }
+    if (!lbGoalsIsCurrentMonth(r.payload, curMonth, curYear)) { console.warn('[lb-goals] gx-api copy is not this month — falling back'); return null; }
+    console.log(`[lb-goals] served by gx-api (age_minutes=${Math.round(age)}, published_at=${r.published_at})`);
+    return r.payload;
+  } catch (e) {
+    console.warn('[lb-goals] gx-api unavailable:', e && e.message);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function fetchPublishedGoals(curMonth, curYear) {
+  // Switch on: gx-api's copy first; null on any doubt, and the GX Core path below runs unchanged.
+  const viaApi = await lbGoalsFromApi_(curMonth, curYear);
+  if (viaApi) return viaApi;
   // GXClient, not a bare fetch: GX Core's /exec second hop 404s on ~6% of rapid calls.
   if (typeof GXClient === 'undefined') return null;
   /* A SHORTENED LADDER, because of WHERE this call sits rather than anything about the route.
@@ -3846,6 +3885,7 @@ async function fetchStoresMeta(pre) {   // `pre`: the opening snapshot's answer,
     const url  = `${proxyUrl}?action=stores&token=${encodeURIComponent(token)}`;
     const data = pre || await gasFetchJson(url, 2, 12000);
     if (!data.stores) { console.warn('fetchStoresMeta: unexpected response', JSON.stringify(data).slice(0, 200)); return; }
+    _salesDataSource = data.data_source === 'api' ? 'api' : 'sheets';   // anything else is the safe default
     if (data.stores.length > 0) {
       applyStoreMeta(data.stores);
       try { localStorage.setItem('gc_stores_meta', JSON.stringify({ stores: data.stores, ts: Date.now() })); } catch(e) {}

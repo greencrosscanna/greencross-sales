@@ -162,7 +162,7 @@ function gxStoreRegistry_() {
   if (_gxStoreRegistry_) return _gxStoreRegistry_;
   let rows = [];
   try {
-    rows = GXCore.getStores() || [];
+    rows = coreData_('stores') || [];
   } catch (e) {
     throw new Error('GX Core store registry unreachable: ' + errText_(e));
   }
@@ -324,7 +324,7 @@ function storeGate_(store) {
   } else {
     let row;
     try {
-      row = GXCore.resolveStore(s);
+      row = coreData_('resolveStore', s);
     } catch (e) {
       // NOT a `false`. Nothing has been learned about this name.
       throw new Error('GX Core store registry unreachable: ' + errText_(e));
@@ -832,7 +832,7 @@ function doGet(e) {
     if (params.store) {
       out.probe = { store: params.store, known: knownStoreSafe_(params.store), exact: labels.indexOf(String(params.store)) !== -1 };
       try {
-        const row = GXCore.resolveStore(String(params.store));
+        const row = coreData_('resolveStore', String(params.store));
         out.probe.store_id = row && row.store_id ? row.store_id : null;
       } catch (e) { out.probe.store_id = null; }
     }
@@ -1593,6 +1593,134 @@ function todayViaApi_(labels, maxAgeS, todayPT) {
     probeMark_('today_source_api', Date.now() - t0, { store: label, age_s: body.stores[label].age_s });
   });
   return out;
+}
+
+/* ─── EVERY OTHER GX CORE DATA READ — ONE HELPER, SAME SWITCH (roadmap [5] slice 5) ──────────────
+ *
+ * The store registry, store-name resolution, period goals, today's pace curves and product velocity.
+ * With SALES_DATA_SOURCE = 'api' they come from gx-api, which copies GX Core's own answers on a clock
+ * (and answers goals/resolution with line-for-line ports of Core's logic, tested side by side with
+ * Core's real functions in the hub). Unset or 'sheets': exactly the old calls, nothing else runs.
+ *
+ *   coreData_('stores')                    GXCore.getStores()
+ *   coreData_('resolveStore', name)        GXCore.resolveStore(name)
+ *   coreData_('periodGoals', store, date)  GXCore.getPeriodGoals(store, date)
+ *   coreData_('velocity', '')              GXCore.getVelocity('')
+ *   coreData_('hourlyShape', 'a,b')        GX Core ?action=hourly_shape&stores=a,b
+ *
+ * THE FALLBACK IS THE SAFETY PROPERTY, as for past days: gx-api's answer is used only when it is a
+ * 200, ok, young enough, and complete. Anything else — a copy older than its limit, a store missing
+ * from velocity, a pace curve missing for one store, "no goal" for a date past the end of the copied
+ * ledger (the copy may simply not have the newest period yet), "unknown store" — goes to the old call,
+ * with a `core_api_fallback` probe mark saying why. Asking twice is the cost; a wrong answer is not.
+ *
+ * This is the ONLY place the GXCore data functions are called (gx_api_core_test checks). Sign-in,
+ * roles, bug filing and library diagnostics stay on the library — they are not data. */
+const CORE_API_MAX_AGE_S_ = { stores: 7200, period_goals: 3600, velocity: 8 * 3600 };
+
+function coreData_(what, a, b) {
+  if (salesDataSource_() === 'api') {
+    const t0 = Date.now();
+    let v;
+    try { v = coreDataApi_(what, a, b); } catch (e) { v = undefined; probeMark_('core_api_fallback', Date.now() - t0, { what: what, why: errText_(e) }); }
+    if (v !== undefined) { probeMark_('core_source_api', Date.now() - t0, { what: what }); return v; }
+  }
+  return coreDataLib_(what, a, b);
+}
+
+function coreDataLib_(what, a, b) {
+  if (what === 'stores')       return GXCore.getStores();
+  if (what === 'resolveStore') return GXCore.resolveStore(a);
+  if (what === 'periodGoals')  return GXCore.getPeriodGoals(a, b);
+  if (what === 'velocity')     return GXCore.getVelocity(a);
+  if (what === 'hourlyShape')  return gxCoreRoute_('hourly_shape', { stores: a });
+  throw new Error('coreData_: unknown read ' + what);
+}
+
+/* One gx-api GET. The parsed body on a 200 that says ok, else null with a mark naming why. */
+function gxApiGet_(pathAndQuery, what) {
+  const t0 = Date.now();
+  const resp = UrlFetchApp.fetch(GX_API_ + pathAndQuery, { headers: { 'x-gx-secret': gxDeploySecret_() }, muteHttpExceptions: true });
+  const code = resp.getResponseCode();
+  if (code !== 200) { probeMark_('core_api_fallback', Date.now() - t0, { what: what, why: 'http_' + code }); return null; }
+  const body = JSON.parse(resp.getContentText() || 'null');
+  if (!body || body.ok !== true) { probeMark_('core_api_fallback', Date.now() - t0, { what: what, why: 'not_ok' }); return null; }
+  return body;
+}
+
+/* gx-api's answer, or undefined for ANY doubt (the caller then asks GX Core). */
+function coreDataApi_(what, a, b) {
+  const doubt = function (why) { probeMark_('core_api_fallback', 0, { what: what, why: why }); return undefined; };
+  const young = function (ageS, limit) { return isFinite(Number(ageS)) && Number(ageS) <= limit; };
+
+  if (what === 'stores') {
+    const body = gxApiGet_('/v1/core/mirror?keys=stores', what);
+    const part = body && body.parts && body.parts.stores;
+    if (!part) return doubt('no_copy');
+    if (!young(part.age_s, CORE_API_MAX_AGE_S_.stores)) return doubt('too_old');
+    const rows = part.body && part.body.stores;
+    if (!Array.isArray(rows) || !rows.length || !rows.every(function (s) { return s && s.store_id && s.dutchie_name; })) return doubt('bad_rows');
+    return rows;
+  }
+
+  if (what === 'resolveStore') {
+    const body = gxApiGet_('/v1/core/resolve_store?name=' + encodeURIComponent(String(a || '')), what);
+    if (!body) return undefined;
+    if (!young(body.age_s, CORE_API_MAX_AGE_S_.stores)) return doubt('too_old');
+    // "Unknown" from a copy might be a store added since it was taken — let Core say so itself.
+    if (!body.store || !body.store.store_id) return doubt('unknown_to_copy');
+    return body.store;
+  }
+
+  if (what === 'periodGoals') {
+    const store = String(a || ''), date = String(b || '');
+    const body = gxApiGet_('/v1/core/period_goals?store=' + encodeURIComponent(store) + '&date=' + encodeURIComponent(date), what);
+    if (!body) return undefined;
+    if (!young(body.age_s, CORE_API_MAX_AGE_S_.period_goals) || !young(body.stores_age_s, CORE_API_MAX_AGE_S_.stores)) return doubt('too_old');
+    const past = !date || !body.ledger_end || date > String(body.ledger_end);   // the copy cannot vouch past its own end
+    const r = body.result;
+    if (store) {
+      if (r && r.dow_targets) return r;
+      return past ? doubt('no_goal_past_copy') : null;    // inside the copied ledger, "no goal" IS the answer
+    }
+    if (!r || !Array.isArray(r.rows) || !Array.isArray(r.picked)) return doubt('bad_shape');
+    if (!r.picked.length && (past || !date)) return doubt('nothing_past_copy');
+    return r;
+  }
+
+  if (what === 'velocity') {
+    if (a) return doubt('one_store_not_mirrored');     // Sales only ever asks for all stores
+    const body = gxApiGet_('/v1/core/mirror?keys=' + encodeURIComponent('velocity:*'), what);
+    const parts = body && body.parts;
+    if (!parts || !Object.keys(parts).length) return doubt('no_copy');
+    let rows = [];
+    for (const k of Object.keys(parts)) {
+      const p = parts[k];
+      // ALL OR NOTHING: one store missing would read as that store selling nothing.
+      if (!p) return doubt('missing ' + k);
+      if (!young(p.age_s, CORE_API_MAX_AGE_S_.velocity)) return doubt('too_old ' + k);
+      if (!p.body || p.body.ok !== true || !Array.isArray(p.body.rows) || !p.body.rows.length) return doubt('empty ' + k);
+      rows = rows.concat(p.body.rows);
+    }
+    return rows;
+  }
+
+  if (what === 'hourlyShape') {
+    const today = Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
+    const key = 'hourly_shape:' + today;
+    const body = gxApiGet_('/v1/core/mirror?keys=' + encodeURIComponent(key), what);
+    const part = body && body.parts && body.parts[key];
+    if (!part || !part.body || !part.body.shapes) return doubt('no_copy');
+    const want = String(a || '').split(',').filter(Boolean);
+    const shapes = {};
+    for (const id of want) {
+      const s = part.body.shapes[id];
+      if (!s || typeof s !== 'object' || !Object.keys(s).length) return doubt('missing ' + id);
+      shapes[id] = s;
+    }
+    return { ok: true, date: today, shapes: shapes, source: 'gx-api' };
+  }
+  return doubt('unknown_read');
 }
 
 /* '' when gx-api's answer for one store can be shown as today's figure, else why not. */
@@ -2545,10 +2673,15 @@ function getISOWeek(date) {
 
 function getStoresMeta_() {
   // `_v2` carries store_id, which the client matches renames on. The old key's entries lack it.
+  /* `data_source` rides on this reply (added at send time, never cached) so the BROWSER knows the
+     switch too: it decides whether Leaderboard's published goals are read from gx-api first. */
+  const withSource = function (body) {
+    try { const o = JSON.parse(body); o.data_source = salesDataSource_(); return JSON.stringify(o); } catch (e) { return body; }
+  };
   const HIT = cacheGet_('stores_meta_v2');
-  if (HIT) return ContentService.createTextOutput(gxScrub_(HIT)).setMimeType(ContentService.MimeType.JSON);
+  if (HIT) return ContentService.createTextOutput(gxScrub_(withSource(HIT))).setMimeType(ContentService.MimeType.JSON);
   try {
-    const rows = GXCore.getStores().map(function(s) {
+    const rows = coreData_('stores').map(function(s) {
       return {
         store_id:     s.store_id,
         dutchie_name: s.dutchie_name,
@@ -2559,7 +2692,7 @@ function getStoresMeta_() {
     });
     const body = JSON.stringify({ stores: rows });
     cacheSet_('stores_meta_v2', body, 3600); // 1-hour TTL — store list rarely changes
-    return ContentService.createTextOutput(gxScrub_(body)).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(gxScrub_(withSource(body))).setMimeType(ContentService.MimeType.JSON);
   } catch(e) {
     // GXCore hiccup — return empty list so frontend keeps its hardcoded fallback colors
     Logger.log('getStoresMeta_ GXCore.getStores failed: ' + e.message);
@@ -2640,7 +2773,7 @@ function getPeriodGoalsForDate_(date) {
     const goals = {};
     for (const s of STORE_MAP) {
       try {
-        const pg = GXCore.getPeriodGoals(s.dutchie, date);
+        const pg = coreData_('periodGoals', s.dutchie, date);
         if (pg && pg.dow_targets) {
           goals[s.sales] = {
             period_start: pg.period_start,
@@ -2700,7 +2833,7 @@ function pgLedgerIntervals_() {
   const cached = cacheGet_('pg_intervals');
   if (cached) { try { const v = JSON.parse(cached); return v.length ? v : null; } catch (e) {} }
   try {
-    const all  = GXCore.getPeriodGoals('', '');
+    const all  = coreData_('periodGoals', '', '');
     const rows = (all && all.rows) || [];
     const seen = Object.create(null);
     const out  = [];
@@ -2748,7 +2881,7 @@ function pgIntervalFor_(intervals, date) {
 function pgLoadPeriod_(date, byStoreId) {
   const out = { window: null, goals: {} };
   try {
-    const all    = GXCore.getPeriodGoals('', date);
+    const all    = coreData_('periodGoals', '', date);
     const picked = all && all.picked;
     // An ANSWER of "no rows" is not a shape failure. `{ok:true, picked:[]}` is Core stating there is
     // no pay period covering this date, which is the normal reply for anything outside the ledger —
@@ -2780,7 +2913,7 @@ function pgLoadPeriod_(date, byStoreId) {
   out.window = null; out.goals = {};
   for (const s of salesStores_()) {
     try {
-      const pg = GXCore.getPeriodGoals(s.dutchie, date);
+      const pg = coreData_('periodGoals', s.dutchie, date);
       if (pg && pg.dow_targets) {
         out.goals[s.sales] = { period_total: pgStretchDaily_(pg.period_total, pg.stretch),
                                dow_targets: pgStretchTargets_(pg.dow_targets, pg.stretch), stretch: pg.stretch };
@@ -3125,7 +3258,7 @@ function paceShapesToday_(storeIds) {
   const missing = storeIds.filter(function (id) { return !cache[id + ':' + today]; });
   if (missing.length) {
     try {
-      const r = gxCoreRoute_('hourly_shape', { stores: missing.join(',') });
+      const r = coreData_('hourlyShape', missing.join(','));
       const shapes = (r && r.shapes) || null;
       if (shapes) {
         let wrote = false;
@@ -4210,7 +4343,7 @@ function getVelocity_(params) {
   }
   let rows;
   try {
-    rows = GXCore.getVelocity('') || [];
+    rows = coreData_('velocity', '') || [];
   } catch (e) {
     return { ok: false, error: 'GX Core velocity unavailable: ' + errText_(e) };
   }

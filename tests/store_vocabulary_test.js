@@ -113,6 +113,7 @@ function buildCtx() {
      credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
   vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext('let _gxStoreRegistry_ = null; let _gxStoreNames_ = null; let _gxStoreIds_ = null;', ctx);
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GXCore)
   vm.runInContext(grab(GS, 'gxStoreRegistry_'), ctx);
   vm.runInContext(grab(GS, 'gxStoreNames_'), ctx);
   vm.runInContext(grab(GS, 'gxStoreIds_'), ctx);

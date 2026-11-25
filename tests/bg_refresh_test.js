@@ -34,11 +34,13 @@ function check(desc, got, want) {
 
 const STORES = ['Bend', 'Center', 'River'];
 const TODAY = '2026-09-17';
-let cache, nowMs, hourPT, fetchAllCalls, fetchCalls, fetchAllImpl, props, liveCalls;
+let cache, nowMs, hourPT, fetchAllCalls, fetchCalls, fetchAllImpl, props, liveCalls, apiUrls, fetchImpl;
 
 function reset() {
   cache = new Map(); nowMs = 1789000000000; hourPT = 12; fetchAllCalls = []; fetchCalls = 0;
-  props = {}; liveCalls = 0;
+  props = {}; liveCalls = 0; apiUrls = [];
+  // Switch off (the default): the only single fetch allowed is none at all.
+  fetchImpl = () => { throw new Error('bg refresh must not use single fetch'); };
   fetchAllImpl = reqs => reqs.map(r => {
     const store = decodeURIComponent(/store=([^&]*)/.exec(r.url)[1]);
     return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true, rows: [{ store }] }) };
@@ -66,7 +68,7 @@ const ctx = {
   },
   UrlFetchApp: {
     fetchAll(reqs) { fetchAllCalls.push(reqs); return fetchAllImpl(reqs); },
-    fetch() { fetchCalls++; throw new Error('bg refresh must not use single fetch'); },
+    fetch(url, o) { fetchCalls++; return fetchImpl(url, o); },
   },
   PropertiesService: { getScriptProperties: () => ({
     getProperty: k => (k === 'GX_DEPLOY_SECRET' ? 's3cret' : (props[k] || null)),
@@ -84,7 +86,9 @@ vm.runInContext([
   'const DTODAY_WAIT_MS_ = 0;', constLine('DTODAY_FLIGHT_TTL_'), constLine('DTODAY_FRESH_S_'),
   constLine('DTODAY_SNAPSHOT_S_'), constLine('DTODAY_KEEP_S_'), constLine('DTODAY_PATH_'),
   constLine('BG_REFRESH_STALE_S_'), constLine('BG_OPEN_HOUR_'), constLine('BG_QUIET_HOUR_'),
-  constLine('BG_REFRESH_LAST_KEY_'),
+  constLine('BG_REFRESH_LAST_KEY_'), constLine('SALES_DATA_SOURCE_PROP_'), constLine('GX_API_'),
+  constLine('GX_API_TODAY_MIN_AGE_S_'),
+  grab('salesDataSource_'), grab('todayViaApi_'), grab('todayApiRefusal_'),
   grab('cacheGet_'), grab('cacheSet_'), grab('gxDeploySecret_'), grab('gxDutchieQs_'), grab('dtodayQuery_'),
   grab('dtodayKey_'), grab('dtodayAgeS_'), grab('bgInStoreHours_'), grab('bgRefreshToday_'), grab('bgRecord_'),
   grab('dtodayMaxAge_'), grab('dutchieTodayFetch_'), grab('dtodayAwaitFlight_'),
@@ -208,6 +212,65 @@ console.log('\nthe real parser on Dutchie-shaped rows: cost flows, nameless item
   const named = vm.runInContext("dtodayFromRows_(rows, '2026-09-17')", c2);
   check('a named item still ranks', named.topProducts.map(p => p.name), ['Blue Dream 3.5g']);
 }
+
+/* ── Switch on (SALES_DATA_SOURCE = api, roadmap [5] slice 4) ────────────────────────────────────
+ * Each check names the fixture that would make it FAIL. */
+console.log('\nswitch on: ONE gx-api call for the due stores; what it cannot vouch for goes to GX Core');
+const apiRow = (store, over) => Object.assign({ date: TODAY, store, net: 1234.56, gross: 1300, discount: 65.44,
+  tax: 222.22, cogs: 500.5, orders: 42, updated_at: new Date(nowMs - 60 * 1000).toISOString() }, over || {});
+function apiOn(stores) {
+  props.SALES_DATA_SOURCE = 'api';
+  fetchImpl = (url, o) => {
+    apiUrls.push({ url, headers: (o && o.headers) || {} });
+    return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true, stores: stores() }) };
+  };
+}
+reset();
+apiOn(() => ({ Bend: { ok: true, row: apiRow('bend'), age_s: 60 }, Center: { ok: true, row: apiRow('center'), age_s: 60 },
+               River: { ok: true, row: apiRow('river-rd'), age_s: 60 } }));
+r = run(false);
+// Fails if the run asks gx-api once per store (three fetches) or not at all.
+check('one gx-api request for all three', apiUrls.length, 1);
+check('...naming every due store and the refresh age', /\/v1\/sales\/today\?stores=Bend%2CCenter%2CRiver&maxage=240$/.test(apiUrls[0].url), true);
+// Fails if the secret is put in the URL, where it lands in logs.
+check('...secret in a header, not the URL', apiUrls[0].headers['x-gx-secret'] === 's3cret' && !/s3cret/.test(apiUrls[0].url), true);
+// Fails if gx-api's answers do not satisfy the run and GX Core is still asked.
+check('GX Core not asked when gx-api vouched for every store', fetchAllCalls.length, 0);
+check('all three pulled, via gx-api', [r.pulled, r.stores.Bend.via], [3, 'gx-api']);
+const apiEnt = JSON.parse(cache.get(key('Bend')).v);
+// Fails if the entry is stamped with OUR clock instead of gx-api's pull time (an old figure called new).
+check('the cached entry carries gx-api\'s pull time, not ours', apiEnt.as_of, nowMs - 60 * 1000);
+check('...in the shape the viewer reads', [apiEnt.netSales, apiEnt.cost, apiEnt.orders, apiEnt.daily[0].date, apiEnt.daily[0].tax], [1234.56, 500.5, 42, TODAY, 222.22]);
+check('no in-flight marker survives', STORES.some(s => cache.has(key(s) + '__inflight')), false);
+
+reset();
+apiOn(() => ({
+  Bend:   { ok: true, row: apiRow('bend'), age_s: 60 },
+  Center: { ok: true, row: apiRow('center', { updated_at: new Date(nowMs - 30 * 60 * 1000).toISOString() }), age_s: 1800, stale: true, error: 'dutchie_http_429' },
+  River:  { ok: true, row: apiRow('river-rd', { orders: 0, net: 0, gross: 0, discount: 0, tax: 0, cogs: 0 }), age_s: 60 },
+}));
+r = run(false);
+// Fails if a stale copy or a zero day mid-afternoon is accepted: that is a LOW figure on screen.
+check('stale and zero-day stores go to GX Core', fetchAllCalls[0].map(q => decodeURIComponent(/store=([^&]*)/.exec(q.url)[1])), ['Center', 'River']);
+check('...the good one does not', r.stores.Bend.via, 'gx-api');
+check('...and the fallbacks are pulled the old way', [r.stores.Center.pulled, r.stores.River.pulled, r.stores.River.via], [true, true, undefined]);
+
+reset();
+props.SALES_DATA_SOURCE = 'api';
+fetchImpl = () => ({ getResponseCode: () => 503, getContentText: () => '{"ok":false}' });
+r = run(false);
+// Fails if a gx-api outage costs a store its figure instead of falling back.
+check('gx-api down: every store still pulled through GX Core', [fetchAllCalls.length, fetchAllCalls[0].length, r.pulled], [1, 3, 3]);
+
+reset();
+props.SALES_DATA_SOURCE = 'api';
+fetchImpl = () => { throw new Error('Address unavailable'); };
+r = run(false);
+check('gx-api unreachable: same', r.pulled, 3);
+
+reset();   // switch off again: not one byte to gx-api
+r = run(false);
+check('switch off: gx-api never called', fetchCalls, 0);
 
 console.log('\nthe trigger is wired');
 check('the handler name is a real public function',

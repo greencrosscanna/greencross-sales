@@ -282,6 +282,19 @@ Tests: `intraday_cache`, `bg_refresh`, `manual_refresh`, `opening_bundle`, `phas
 Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" · "ONE read of a snapshot"
 · "CLOUDFLARE" · "shortcut was unreachable" · "overnight pause"
 
+## Past days from gx-api — a switch, OFF until 14 clean days (roadmap [5])
+
+- Every settled-day read goes through **`settledSalesRows_`** (never call `GXCore.getSalesDaily`
+  directly; `gx_api_settled_test` fails if one appears). Script Property **`SALES_DATA_SOURCE`**:
+  unset/`sheets` = GX Core's Sheets cache, as always; `api` = gx-api (Cloudflare, hub `api/`).
+- **The fallback is the point:** gx-api's answer is used only when it is a 200, ok, and has a row
+  for EVERY day asked. Short, refused, failed or odd → Sheets for that call, with a
+  `settled_api_fallback` probe mark. These numbers are reconciled against bank deposits.
+- Flip: `?action=datasource&set=api|sheets&secret=…` (no `set` reads it). No deploy; `sheets` is
+  the rollback. Only after gx-api's `/v1/health` shows 14 clean days AND Sky says so.
+
+Tests: `gx_api_settled`.
+
 ## `/exec` stalls — Google's hop, not ours
 
 - `/exec` intermittently fails to return, in **windows** that last minutes — the stalls are NOT

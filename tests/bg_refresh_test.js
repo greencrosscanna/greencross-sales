@@ -194,10 +194,10 @@ check('summary persisted', JSON.parse(props.BG_REFRESH_LAST).stores.Bend.error !
 
 console.log('\nthe real parser on Dutchie-shaped rows: cost flows, nameless items do not become "Unknown"');
 {
-  const c2 = { GXCore: { salesFromTxns: txns => ({
-    net: txns.reduce((s, t) => s + t.totalBeforeTax, 0), gross: 0, discount: 0, tax: 0, orders: txns.length,
-    cogs: txns.reduce((s, t) => s + t.items.reduce((a, it) => a + it.unitCost * it.quantity, 0), 0) }) } };
+  // The REAL revenue rules — Sales' verbatim copy of Core's (revenue_rules.gs, slice 7), not a stub.
+  const c2 = {};
   vm.createContext(c2);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'revenue_rules.gs'), 'utf8'), c2);
   vm.runInContext(grab('dtodayFromRows_'), c2);
   // Exactly the item keys Dutchie returned 2026-09-17 with IncludeDetail=true: no productName.
   const tx = (id, cost) => ({ transactionId: id, transactionType: 'Retail', isVoid: false, totalBeforeTax: 20,

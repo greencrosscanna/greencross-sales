@@ -79,7 +79,8 @@ console.log('\n1. phase decides which halves are FETCHED, not merely which are r
     let settledReads = 0, liveReads = 0;
     const ctx = {
       Utilities: { formatDate: () => '2026-09-11' },
-      GXCore: { getSalesDaily: () => { settledReads++; return [{ date: '2026-09-10', net: 100, gross: 120, orders: 4, discount: 1, tax: 9, cogs: 50 }]; } },
+      // GX Core's sales_rows route (slice 7; was GXCore.getSalesDaily).
+      gxCoreData_: (a) => { if (a !== 'sales_rows') throw new Error('unexpected ' + a); settledReads++; return { ok: true, rows: [{ date: '2026-09-10', net: 100, gross: 120, orders: 4, discount: 1, tax: 9, cogs: 50 }] }; },
       dutchieTodayFetch_: () => { liveReads++; return { netSales: 40, grossSales: 44, orders: 2, discounts: 0, cost: 20, tax: 3, daily: [{ date: '2026-09-11', netSales: 40, grossSales: 44, orders: 2, discounts: 0, cogs: 20, tax: 3 }], topProducts: [{ name: 'x' }] }; },
       cacheGet_: () => null, cacheSet_: () => {},
       dtodayMaxAge_: () => 90,

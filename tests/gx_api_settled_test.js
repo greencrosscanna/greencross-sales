@@ -38,7 +38,11 @@ function world(opts) {
   const w = { sheetCalls: 0, fetches: [], marks: [] };
   const ctx = {
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => k === 'GX_DEPLOY_SECRET' ? 'test-secret' : (k === 'SALES_DATA_SOURCE' ? opts.source : null) }) },
-    GXCore: { getSalesDaily: () => { w.sheetCalls++; return SHEET; } },
+    // GX Core's sales_rows route (slice 7; was the GXCore.getSalesDaily library call). Same rows.
+    gxCoreData_: (action, body) => {
+      if (action !== 'sales_rows') throw new Error('unexpected route ' + action);
+      w.sheetCalls++; w.coreBody = body; return { ok: true, rows: SHEET };
+    },
     UrlFetchApp: { fetch: (url, o) => {
       w.fetches.push({ url, headers: (o && o.headers) || {} });
       if (opts.throws) throw new Error('Address unavailable: ' + url);
@@ -59,7 +63,10 @@ console.log('\n1. the switch is off by default — exactly the old behavior');
 {
   const w = world({ source: null });
   const r = w.run('Bend', '2026-11-21', '2026-11-22');
-  ok(r === SHEET && w.sheetCalls === 1, 'no switch: GXCore.getSalesDaily, once');
+  ok(r === SHEET && w.sheetCalls === 1, 'no switch: GX Core\'s sales_rows route, once');
+  // Fails if the store or the days are dropped on the way to Core (Core would then answer ALL stores).
+  ok(w.coreBody && w.coreBody.store === 'Bend' && w.coreBody.from === '2026-11-21' && w.coreBody.to === '2026-11-22',
+     '...asked for exactly this store and these days');
   ok(w.fetches.length === 0, 'and nothing is sent to gx-api');
   ok(world({ source: 'cloudflare' }).src() === 'sheets', 'an unrecognized value is the safe default');
   ok(world({ source: ' API ' }).src() === 'api', 'case and spaces do not matter');
@@ -96,7 +103,23 @@ console.log('\n3. switch on, any doubt: back to Sheets, never a short month');
 
 console.log('\n4. every settled read goes through the switch, and the switch is an operator route');
 {
-  ok(!/GXCore\.getSalesDaily\(/.test(GS.replace(SETTLED_SRC, '')), 'no GXCore.getSalesDaily call is left outside settledSalesRows_');
+  ok(!/GXCore\.getSalesDaily\(/.test(GS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')), 'no GXCore.getSalesDaily library call is left anywhere');
+  // Fails if something reads Core's settled rows around the switch.
+  const callers = (GS.match(/coreSalesRowsLive_\(/g) || []).length;
+  ok(callers === 2 && /return coreSalesRowsLive_\(store, from, to\);/.test(grab(GS, 'settledSalesRows_')),
+     'Core\'s sales_rows is read only as settledSalesRows_\'s switch-off path (' + callers + ' mentions: definition + that call)');
+  {
+    // A refusal from Core is an ERROR, never an empty month. Fails if coreSalesRowsLive_ swallowed it.
+    const w = world({ source: null });
+    const ctx2 = {}; let threw = '';
+    try {
+      vm.createContext(ctx2);
+      vm.runInContext(grab(GS, 'coreSalesRowsLive_') + '\nthis.f = coreSalesRowsLive_;', ctx2);
+      ctx2.gxCoreData_ = () => ({ ok: true, rows: 'nope' });
+      ctx2.f('Bend', '2026-11-21', '2026-11-22');
+    } catch (e) { threw = e.message; }
+    ok(/unrecognized answer/.test(threw) && w, 'an odd answer from Core throws rather than reading as no sales');
+  }
   const route = /if \(params\.action === 'datasource'\) \{[\s\S]*?\n  \}/.exec(GS);
   ok(!!route, 'the datasource route exists');
   ok(route && /params\.secret !== secret\) return jsonOut_\(\{ ok: false, error: 'Forbidden' \}\)/.test(route[0]), '...gated by the deploy secret');

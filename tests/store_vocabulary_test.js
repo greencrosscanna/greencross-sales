@@ -66,26 +66,24 @@ ok('index.html still declares six stores', FRONTEND.length === 6);
 // The registry ROWS, the shape GXCore.getStores() actually returns — store_id and dutchie_name on
 // the same row. That pairing is the point: gxStoreIds_ reads the ids off these rows rather than
 // asking resolveStore for each one, so the id list cannot lose a store to a transient.
+/* Shaped like GX Core's PUBLISHED registry (?action=stores, which Sales reads since slice 7): each
+   row carries its `aliases`, already folded by Core to include the display and Dutchie names. */
 const ROWS = [
-  { store_id: 'bend',        dutchie_name: 'Bend' },
-  { store_id: 'center',      dutchie_name: 'Center' },
-  { store_id: 'commercial',  dutchie_name: 'Commercial' },
-  { store_id: 'hillsboro',   dutchie_name: 'Hillsboro' },
-  { store_id: 'portland-rd', dutchie_name: 'Portland Rd' },
-  { store_id: 'river-rd',    dutchie_name: 'River Rd' },
+  { store_id: 'bend',        dutchie_name: 'Bend',        display_name: 'Century',  aliases: ['Century', 'Bend'] },
+  { store_id: 'center',      dutchie_name: 'Center',      display_name: 'Center',   aliases: ['Center'] },
+  { store_id: 'commercial',  dutchie_name: 'Commercial',  display_name: 'Commercial', aliases: ['South', 'Commercial'] },
+  { store_id: 'hillsboro',   dutchie_name: 'Hillsboro',   display_name: 'Baseline', aliases: ['Baseline', 'Hillsboro'] },
+  { store_id: 'portland-rd', dutchie_name: 'Portland Rd', display_name: 'Portland', aliases: ['Portland', 'Portland Rd'] },
+  { store_id: 'river-rd',    dutchie_name: 'River Rd',    display_name: 'River',    aliases: ['River', 'River Rd'] },
 ];
 const REGISTRY = ROWS.map(r => r.dutchie_name);
-const FOLD = {              // what GXCore.resolveStore answers, for the names this test asks about
-  'bend': 'bend', 'center': 'center', 'commercial': 'commercial', 'hillsboro': 'hillsboro',
-  'portland rd': 'portland-rd', 'portland': 'portland-rd',
-  'river rd': 'river-rd', 'river': 'river-rd',
-};
 
 let resolveCalls = 0;       // how many times the gate reaches the registry's folding
-let resolveThrows = false;  // simulate a GX Core hiccup on the second chance
+let resolveThrows = false;  // simulate a failure on the second chance
 
 function buildCtx() {
   const store = {};
+  const routes = require('./_core_routes_stub').coreRoutesFrom({ getStores: () => ROWS.map(r => Object.assign({}, r)) });
   const ctx = {
     console,
     // The script cache, faked with a plain map. Real CacheService is shared across executions and
@@ -93,19 +91,8 @@ function buildCtx() {
     cacheGet_: k => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
     cacheSet_: (k, v) => { store[k] = String(v); },
     _cacheStore: store,
-    GXCore: {
-      getStores() { return ROWS.map(r => ({ store_id: r.store_id, dutchie_name: r.dutchie_name })); },
-      resolveStore(name) {
-        resolveCalls++;
-        if (resolveThrows) throw new Error('GX Core hiccup');
-        // Deliberately a null-prototype lookup with an own-property check: the real registry cannot
-        // answer for an inherited name either, and a plain object here would hand the gate a
-        // function and hide the very regression this test exists to catch.
-        const k = String(name).trim().toLowerCase();
-        if (!Object.prototype.hasOwnProperty.call(FOLD, k)) return null;
-        return { store_id: FOLD[k], dutchie_name: name };
-      },
-    },
+    gxCoreData_: routes.gxCoreData_, gxCoreDataAll_: routes.gxCoreDataAll_,
+    probeMark_: () => {},
   };
   vm.createContext(ctx);
   vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
@@ -113,12 +100,15 @@ function buildCtx() {
      credential scrub runs on the way out. See gxScrub_ in dutchie_proxy.gs. */
   vm.runInContext(SCRUB_DECLS + '\n' + grab(GS, 'gxScrub_') + '\n' + grab(GS, 'errText_'), ctx);
   vm.runInContext('let _gxStoreRegistry_ = null; let _gxStoreNames_ = null; let _gxStoreIds_ = null;', ctx);
-  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GXCore)
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GX Core's routes)
   vm.runInContext(grab(GS, 'gxStoreRegistry_'), ctx);
   vm.runInContext(grab(GS, 'gxStoreNames_'), ctx);
   vm.runInContext(grab(GS, 'gxStoreIds_'), ctx);
   vm.runInContext(grab(GS, 'storeGate_'), ctx);
   vm.runInContext(grab(GS, 'knownStore_'), ctx);
+  // Count — and on demand fail — the SHIPPED resolver, Core's folding as Sales now runs it.
+  const real = ctx.coreResolveStore_;
+  ctx.coreResolveStore_ = function (a, s) { resolveCalls++; if (resolveThrows) throw new Error('GX Core hiccup'); return real(a, s); };
   return ctx;
 }
 const ctx = buildCtx();
@@ -213,7 +203,7 @@ ok('a registry ALIAS of a real store is accepted ("Portland" → portland-rd)',
   resolveThrows = true;
   try { c.knownStore_('River'); } catch (e) {}
   resolveThrows = false;
-  ok('a hiccup writes nothing to the memo', Object.keys(c._cacheStore).length === 0);
+  ok('a hiccup writes nothing to the memo', !Object.keys(c._cacheStore).some(k => k.indexOf('storeid_v1_') === 0));
   ok('...so the very next request resolves normally', c.knownStore_('River') === true);
 }
 

@@ -99,7 +99,7 @@ const ctx = {
   console,
   PG_RANGE_MAX_DAYS_: null,
   gxStoreRegistry_: () => { throw new Error('registry unreachable in this test'); },
-  GXCore: { getSalesDaily: (store, from, to) => { capturedRanges.push([store, from, to]); return salesRows(store, from, to); } },
+  CORE_FIXTURE: { getSalesDaily: (store, from, to) => { capturedRanges.push([store, from, to]); return salesRows(store, from, to); } },
   Utilities: { formatDate: () => TODAY },
   dayBefore_: ds => iso(at(ds) - dayMs),
   jsonOut_: d => d,   // the route returns a TextOutput; here the object itself is the assertion target
@@ -108,6 +108,8 @@ const ctx = {
                                        uncovered_days: 0, truncated: false })
   }),
 };
+// CORE_FIXTURE is library-shaped; GX Core's sales_rows route answers from it (slice 7: no library).
+ctx.gxCoreData_ = (a, b) => require('./_core_routes_stub').coreRoutesFrom(ctx.CORE_FIXTURE).gxCoreData_(a, b);
 vm.createContext(ctx);
 vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
 /* The REAL scrub, not a stub: the read-error path below now also proves the credential scrub
@@ -181,7 +183,7 @@ ok('no read errors on a clean run', r.read_errors.length === 0);
 // ── A store whose sales read THROWS ───────────────────────────────────────────────────────────
 // It must be named, and it must drop out rather than reading as a store with zero sales — a silent
 // 0% is the single most alarming wrong answer this route could produce.
-ctx.GXCore.getSalesDaily = (store, from, to) => {
+ctx.CORE_FIXTURE.getSalesDaily = (store, from, to) => {
   if (store === 'Bend') throw new Error('GX Core timeout');
   return salesRows(store, from, to);
 };
@@ -192,7 +194,7 @@ ok('a failed store read is excluded from the total', rf.periods[0].total.goal ==
 ok('a failed store read is absent from by_store', rf.summary.by_store['Bend'] === undefined);
 
 // ── An entirely unsettled range answers, rather than erroring ─────────────────────────────────
-ctx.GXCore.getSalesDaily = (store, from, to) => salesRows(store, from, to);
+ctx.CORE_FIXTURE.getSalesDaily = (store, from, to) => salesRows(store, from, to);
 ctx.getPeriodGoalsRange_ = (start, end) => ({
   getContent: () => JSON.stringify({ ok: true, start, end, periods: [PERIODS[2]],
                                      uncovered_days: 0, truncated: false })

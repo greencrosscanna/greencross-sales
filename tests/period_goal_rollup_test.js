@@ -240,7 +240,9 @@ check('the ledger is learned once, as INTERVALS not a min/max span',
 check('membership is exact, not a span comparison',
   /!pgIntervalFor_\(intervals, date\)/.test(PROXY) && !/bounds\.min/.test(PROXY), true);
 check('intervals read only period dates — never a goal value, never a tie-break',
-  !/pgLedgerIntervals_[\s\S]{0,900}dow_targets/.test(PROXY), true);
+  // The function's own body, not "900 characters after its name anywhere": since slice 7 another
+  // function's comment names pgLedgerIntervals_ and reads dow_targets a few lines later.
+  !/dow_targets/.test((/\nfunction pgLedgerIntervals_\([\s\S]*?\n\}/.exec(PROXY) || ['dow_targets'])[0]), true);
 check('overlapping orphan intervals cost a lookup, never a wrong goal',
   /ANSWER still comes from Core's own tie-break/.test(PROXY), true);
 // cacheGet_ is two CacheService round-trips. Skipping the probe but still doing the lookup left a

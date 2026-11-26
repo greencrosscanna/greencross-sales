@@ -62,11 +62,15 @@ Hist: "MUTATE A GUARD" · "two NUL bytes"
 
 ## Stores come from GX Core
 
-- **Never hardcode stores.** `knownStore_`'s **second chance goes through `GXCore.resolveStore`, never a
-  local alias table**, accepted only when it carries a `store_id` the registry lists (so
-  `constructor` / `__proto__` still fail). River proves it: the frontend sends `River`, the registry's
-  `dutchie_name` is `River Rd`, its `display_name` is `River`.
-- Ids come off `GXCore.getStores()` rows (`gxStoreRegistry_`, memoized per execution); the resolve is
+- **Never hardcode stores.** `knownStore_`'s **second chance goes through Core's resolver
+  (`coreData_('resolveStore')`), never a local alias table**, accepted only when it carries a `store_id`
+  the registry lists (so `constructor` / `__proto__` still fail). River proves it: the frontend sends
+  `River`, the registry's `dutchie_name` is `River Rd`, its `display_name` is `River`.
+- **Since slice 7 the resolver is a PORT** (`coreResolveStore_`, Core has no resolve route) run over
+  Core's published `?action=stores` rows. `store_resolve_contract_test` runs it against Core's real
+  `gxResolveStore_` (sibling hub) — never edit the port without re-checking against Core's.
+- Ids come off the registry rows (`gxStoreRegistry_`, memoized per execution; `coreStoresLive_` caches
+  the route 10 min and keeps a 6h last-good copy used ONLY when Core cannot answer); the resolve is
   memoized 1h in the script cache. **A registry failure THROWS; it never returns `false`** ("not a store"
   and "the registry did not answer" are different). **A throw is never cached. A null answer is.**
   `storeGateError_` / `knownStoreSafe_` carry the distinction to write routes and probes.
@@ -97,9 +101,11 @@ Hist: "store VOCABULARY" · "store LIST" · "FREQUENCY" · "ATM_MACHINE_MAP"
   one quick read" (`sheet_severance_test` asserts the absence). The legacy "2026 GX2 Dashboard" workbook
   is not read. Served from ScriptProperties: `frozen_goals` · `frozen_expbudgets` · `frozen_qbmapping` ·
   `otherrev_data` · `rev_atm_*`; `?action=freezestatus&secret=…` reports all of it.
-- **The `spreadsheets` OAuth scope STAYS, deliberately — do not "tidy" it away.** GXCore runs under this
-  project's authorization; dropping it severs `getPeriodGoals` and `roleForApp`, and the fail-closed
-  write guard would then refuse every write.
+- **The `spreadsheets` OAuth scope STAYS — do not "tidy" it away on your own.** It was needed while the
+  GXCore library ran under this project's authorization (unbound in slice 7, 2026-11-25). It was kept
+  through the unbind so that deploy changed NO scope and needed no re-authorization in the editor
+  (`core_live_routes_test` pins the list). Removing it now is probably safe, but it is a separate
+  change that needs Sky's word and a re-authorization.
 - Check properties before removing a "one-time" bootstrap; one-time does not mean spent. Budget goals are
   2026 only (`BUDGET_YEAR`); the frontend returns 0 / no goal for any other year.
 - **Smart budget** — `?action=budget_proposal`, from **24 complete months** of QuickBooks actuals (month
@@ -303,7 +309,7 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
 - **Everything else from GX Core (slice 5, 2026-11-25), same switch:** the store registry, store
   resolution, period goals, today's pace curves and velocity all go through **`coreData_`** — never
   call `GXCore.getStores/resolveStore/getPeriodGoals/getVelocity` or the `hourly_shape` route anywhere
-  else (`gx_api_core_test` fails if one appears). `coreDataLib_` is the old path; `coreDataApi_` reads
+  else (`gx_api_core_test` fails if one appears). `coreDataCore_` is the switch-off path; `coreDataApi_` reads
   gx-api's verbatim copy of Core's answers and returns `undefined` on any doubt (too old, a store
   missing, "unknown store", "no goal" past the copied ledger's end). A test that grabs a caller must
   also load `tests/_core_data_src.js`.
@@ -318,13 +324,23 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
   Core sign-in or role fix reaches Sales with no re-pin. Never call `GXCore.login/roleForApp/
   roleCanEdit/gxIngestBug` again (`write_guard_test` §4 fails if one appears; authprobe's diagnostic
   aside).
-- **Still on the library, on purpose:** the switch-OFF data path (`coreDataLib_`, `getSalesDaily`),
-  `salesFromTxns` (today's figure on the Core fallback path), and `libVersion` diagnostics. After the
-  flip those only run on a fallback, so a re-pin is needed only to fix the fallback. QuickBooks stays
-  on Core's routes.
+- **NO LIBRARY AT ALL (slice 7, 2026-11-25).** `appsscript.json` has no dependencies — **Sales never
+  needs a GXCore re-pin again; don't re-add the binding.** The switch-OFF data path (`coreDataCore_`)
+  is GX Core's live routes, POSTed by `gxCoreData_` / `gxCoreDataAll_` (secret in the body, `null` is
+  an answer, a refusal throws): `stores` (cached 10 min + 6h last-good), `period_goals` (cached 10 min
+  per store+date, null included), `velocity_rows` per store in parallel (all or nothing),
+  `sales_rows` (behind `settledSalesRows_`), `hourly_shape`. Resolution is a port
+  (`coreResolveStore_`, see Stores). Every one is an `/exec` hop where the library was in-process —
+  keep the caches when you touch them.
+- **`salesFromTxns` is Core's, COPIED VERBATIM into `revenue_rules.gs`** (with its 8 helpers). Never
+  edit it in place — re-copy from the hub's `gx_dutchie.gs`. `revenue_rules_copy_test` (and the hub's
+  `revenue_rules_contract_test`) fail on a one-character difference.
+- `gxpin` / `libversion` report `gxcore_version: null, bound: false` — never Core's live number,
+  because `gxengine.sh` records any number there as the library version the app runs.
 
 Tests: `gx_api_settled`, `gx_api_today`, `gx_api_core`, `bg_refresh` (switch-on section),
-`write_guard`, `login_core_only`, `bug_context_forward`, `bug_mail_fallback`.
+`write_guard`, `login_core_only`, `bug_context_forward`, `bug_mail_fallback`, `core_live_routes`,
+`store_resolve_contract`, `revenue_rules_copy`.
 
 ## `/exec` stalls — Google's hop, not ours
 
@@ -350,12 +366,12 @@ Hist: "STALLS ARE NOT INDEPENDENT" · "Two more runs" · "~4% of /exec" (the v2.
   never app-to-app: the one direct address left, deliberately, is `fetchLeaderboardGoalsDirect` (fallback,
   URL from Core config `lbGoals`); `velocity_via_core_test` fails on any THIRD Apps Script address in
   `index.html`.
-- `?action=velocity` → `getVelocity_` → `GXCore.getVelocity('')` (keyed by dutchie_name, selling products
-  only, cached 1h). **Empty is an ERROR on both sides, never a result** — never cached; the tile reads
+- `?action=velocity` → `getVelocity_` → `coreData_('velocity','')` → Core's `velocity_rows` once per
+  registry store, in parallel, ALL OR NOTHING (keyed by dutchie_name, selling products only, cached 1h). **Empty is an ERROR on both sides, never a result** — never cached; the tile reads
   `—`. Tried, not loading: `renderInventory` re-asks at most every 5 minutes after a failure — the
   render a load triggers must not re-trigger it.
-- The four retry loops (`gxDutchieGet_`, `gxCoreRoute_`, `qbReportViaGXCore_`, `qbDepositsViaGXCore_`)
-  check `GXCORE_RETRY_BUDGET_MS` (60,000) **before sleeping and re-asking** — Apps Script kills a script
+- The retry loops (`gxDutchieGet_`, `gxCoreRoute_`, `gxCorePost_`, `gxCoreData_`, `gxCoreDataAll_`,
+  `qbReportViaGXCore_`, `qbDepositsViaGXCore_`) check `GXCORE_RETRY_BUDGET_MS` (60,000) **before sleeping and re-asking** — Apps Script kills a script
   at 360s. **Do not sync that constant from another app.**
 - `probeMark_` marks are NOT a log. The only persisted `/exec` telemetry is GX Core's
   `?action=request_stats` (deploy-secret gated).
@@ -397,27 +413,24 @@ Hist: "60-second clock" · "Inventory tab's sales speed" · "getCogsDutchie" · 
 Tests: `bug_mail_fallback`, `secret_scrub`. Hist: "filed bug whose email dies" · "carry a credential" ·
 "ONE of the three ways" · "ONE list now" · "MAIL was an exit" · "screenshot died"
 
-## GX Core: brain and pin
+## GX Core: brain and (no) pin
 
 - **`/gxbrain`** (or "brain sync") loads the shared rules and reconciles this chat with GX Core; the
   notes inbox is `to_app=sales` (`resolve_note`, `add_note`), surfaced by the SessionStart hook.
-- **Verify the `GXCore` pin by asking the live app, never by reading the repo.** Re-pinning is two steps
-  and the second gets skipped: set the version, then **deploy**. Then measure (`?action=libversion`, or):
+- **Sales binds NO GXCore library since slice 7 (2026-11-25)** — there is nothing to re-pin. A hub
+  re-pin announcement (`./gxrepin.sh`) does not apply to Sales; a Core fix reaches Sales the moment Core
+  ships it. `gxpin` still answers (with `gxcore_version: null, bound: false` and `qb.last_source`):
 
 ```
 bash gxsalesprobe.sh gxpin
 ```
 
-  `gxpin` returns `GXCore.libVersion()` plus `qb.last_source` (`gxcore@…`; `null` = nothing has missed
-  cache yet). **A `Forbidden` here is a finding, not a route bug**: `GX_DEPLOY_SECRET` is unset or stale
-  on this script, and that same property gates `qbReportViaGXCore_`. Re-check after any deploy that
-  touches script properties. Pinned to GXCore — check the live value, do not trust any written number
-  (`?action=libversion`, or `./gxpins.sh --live` from the hub).
-- **Re-run the discriminating probes after any GXCore re-pin** (`bash gxsalesprobe.sh <route> [key=value…]`):
+  **A `Forbidden` here is a finding, not a route bug**: `GX_DEPLOY_SECRET` is unset or stale on this
+  script, and that same property gates every GX Core data route now, plus `qbReportViaGXCore_`.
+- **Re-run the discriminating probes after any GX Core ship that touches these routes** (`bash gxsalesprobe.sh <route> [key=value…]`):
   `goalprobe date=YYYY-MM-DD` (must return all SIX stores) · `goalrangeprobe start=… end=…` ·
   `budgetprobe` · `expbreakprobe` · `pnlprobe` · `reconprobe` (`notes_seen: 0` over a range that HAS
-  deposits = a Core without `PrivateNote`) · `authprobe user=shawn`. A pin that reports the right version
-  and still returns the wrong data is a different failure from one that never took.
+  deposits = a Core without `PrivateNote`) · `authprobe`.
 - A Core bug is fixed in Core; the workaround belongs nowhere. `expectedSalesFrac` does NOT share the
   store-alias assumption — `getPacingFracs_` is fine as written.
 

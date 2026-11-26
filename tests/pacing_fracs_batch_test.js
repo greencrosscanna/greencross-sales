@@ -91,6 +91,7 @@ function makeCtx(route, seededStore, now) {
   vm.runInContext(grabConst(GS, 'PACE_CLOSE_HOUR'), ctx);
   vm.runInContext(grabConst(GS, 'GC_PACE_SHAPES_KEY'), ctx);
   vm.runInContext('var _PACE_SHAPES_MEMO = null;', ctx);
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → gxCoreRoute_)
   vm.runInContext(grab(GS, 'paceFracFromShape_'), ctx);
   vm.runInContext(grab(GS, 'paceShapesToday_'), ctx);
   vm.runInContext(grab(GS, 'getPacingFracs_'), ctx);

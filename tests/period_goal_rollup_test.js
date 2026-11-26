@@ -213,12 +213,12 @@ check('each frozen period is cached under every date it covers',
 check('a miss streak stops the walk instead of probing a year day by day',
   /MISS_LIMIT/.test(PROXY), true);
 check('period boundaries come from GXCore, never from a 14-day stride',
-  /GXCore\.getPeriodGoals\(s\.dutchie, date\)/.test(PROXY), true);
+  /coreData_\('periodGoals', s\.dutchie, date\)/.test(PROXY), true);
 // getPeriodGoals re-reads the whole period_goals tab per call, so asking per store cost six full
 // tab reads per period — 42s for a cold YTD, measured on the deployed route. The store-less form
 // returns `picked`, one row per store, in one read.
 check('one store-less call per period, not six per-store ones',
-  /GXCore\.getPeriodGoals\(''\, date\)/.test(PROXY) || /GXCore\.getPeriodGoals\('', date\)/.test(PROXY), true);
+  /coreData_\('periodGoals', '', date\)/.test(PROXY), true);
 check('picked rows join on canonical store_id, not the tab\'s aliases',
   /byStoreId\[String\(r\.store_id/.test(PROXY), true);
 // Since 2026-09-14 the ids come off the registry rows themselves (salesStores_ reads GXCore.getStores),

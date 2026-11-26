@@ -300,7 +300,21 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
   than asked, a non-number, or **zero orders during store hours**. `as_of` is gx-api's pull time,
   never ours. Switch off: no request is made.
 
-Tests: `gx_api_settled`, `gx_api_today`, `bg_refresh` (switch-on section).
+- **Everything else from GX Core (slice 5, 2026-11-25), same switch:** the store registry, store
+  resolution, period goals, today's pace curves and velocity all go through **`coreData_`** — never
+  call `GXCore.getStores/resolveStore/getPeriodGoals/getVelocity` or the `hourly_shape` route anywhere
+  else (`gx_api_core_test` fails if one appears). `coreDataLib_` is the old path; `coreDataApi_` reads
+  gx-api's verbatim copy of Core's answers and returns `undefined` on any doubt (too old, a store
+  missing, "unknown store", "no goal" past the copied ledger's end). A test that grabs a caller must
+  also load `tests/_core_data_src.js`.
+- **The browser too:** `?action=stores` carries `data_source`; with `api`, `lbGoalsFromApi_` reads
+  Leaderboard's published goals from gx-api first (copy age ADDED to the payload's age, same 30h and
+  this-month guards) and returns null so `fetchPublishedGoals` goes on to Core unchanged.
+- **Still on the library, on purpose:** sign-in/roles (`login`, `roleForApp`, `roleCanEdit`), bug
+  filing (`gxIngestBug`), `libVersion`, and `salesFromTxns` (today's figure on the Core fallback path).
+  QuickBooks stays on Core's routes.
+
+Tests: `gx_api_settled`, `gx_api_today`, `gx_api_core`, `bg_refresh` (switch-on section).
 
 ## `/exec` stalls — Google's hop, not ours
 

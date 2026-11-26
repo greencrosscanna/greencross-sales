@@ -140,7 +140,7 @@ console.log('\n5. a corrupt flag costs the flag, never the figures');
 console.log('\n6. the route is write-guarded and carries the user');
 {
   ok('set_atm_paid goes through writeGuard_',
-     /action === 'set_atm_paid'\)\s*\{ const g = writeGuard_\(auth\.user, 'set_atm_paid'\)/.test(GS));
+     /action === 'set_atm_paid'\)\s*\{ const g = writeGuard_\(auth, 'set_atm_paid'\)/.test(GS));
   ok('...and refuses before reaching the handler',
      /'set_atm_paid'\); if \(!g\.ok\) return jsonOut_\(g\); params\._user = auth\.user; return setAtmPaid_/.test(GS));
   ok('revenue_detail carries the paid map, so the tab needs no second call',

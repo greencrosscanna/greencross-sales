@@ -153,6 +153,82 @@ function gxCoreRoute_(action, params) {
   throw new Error('GX Core ' + action + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
 }
 
+/* ─── SIGN-IN, ROLES AND BUG FILING ASK GX CORE'S LIVE ROUTES, NOT THE PINNED LIBRARY (slice 6) ───
+ *
+ * A GXCore.x() call runs the library version this app PINS, so every sign-in, role or bug-filing fix
+ * in Core reached Sales only after a re-pin and a deploy here. Roughly ten of Sales' ~50 re-pins since
+ * 2026-08 were exactly that. Core's /exec runs Core's current code, so these now follow Core the moment
+ * it ships.
+ *
+ * POST, with the body as JSON in text/plain (Core's doPost reads it; text/plain is what Core expects).
+ * A password, a session token and the deploy secret therefore never sit in a URL, where execution
+ * logs and error messages would carry them.
+ *
+ * Returns Core's answer WHENEVER IT IS ONE — ok:true or ok:false. "Wrong password" and "no access"
+ * are answers, and the callers branch on them; gxCoreRoute_ above throws on ok:false, which is right
+ * for data and wrong here. Throws only when Core did not answer at all. */
+function gxCorePost_(action, body, withSecret) {
+  const payload = Object.assign({}, body || {}, { action: action });
+  if (withSecret) payload.secret = gxDeploySecret_();
+  const opts = { method: 'post', contentType: 'text/plain', payload: JSON.stringify(payload),
+                 muteHttpExceptions: true, followRedirects: true };
+  let lastErr = '', stopped = '', tries = 0;
+  const started = Date.now();
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) { stopped = gxRetryHold_(started, 300); if (stopped) break; }   // see GXCORE_RETRY_BUDGET_MS
+    tries++;
+    let data = null;
+    try {
+      const resp = UrlFetchApp.fetch(GXCORE_EXEC_, opts);
+      try { data = JSON.parse(resp.getContentText()); }
+      catch (e) { lastErr = 'unparseable body (HTTP ' + resp.getResponseCode() + ')'; }
+    } catch (e) {
+      lastErr = errText_(e);
+    }
+    if (data && typeof data.ok === 'boolean') return data;
+    lastErr = lastErr || 'no payload';
+  }
+  throw new Error('GX Core ' + action + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
+}
+
+/* This session's Sales role, from GX Core's verify route — the same check every spoke backend uses
+ * ("may this token act in my app?"). It re-checks the GRANT, not only the signature, and its canEdit
+ * is Core's own roleCanEdit, so the editor/viewer line is drawn in one place.
+ *
+ *   { role, canEdit, err }  — err set means Core could not say; role null with no err means it said NO.
+ *
+ * A Core answer of invalid/expired is an ERROR here, not a "no": this app validated the same token a
+ * moment earlier against the shared secret, so disagreement means the two secrets or clocks differ —
+ * something to see, not a reason to treat a real user as revoked.
+ *
+ * Cached 60s per session (a hash of the token, never the token), so a burst of saves costs one call
+ * and a revocation still bites inside a minute. Errors are never cached: nothing was learned. */
+const CORE_ROLE_TTL_S_ = 60;
+function coreRoleForSession_(token) {
+  const t = String(token || '');
+  let key = '';
+  try {
+    key = 'corerole_v1_' + Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, t)
+      .map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('').slice(0, 40);
+    const hit = cacheGet_(key);
+    if (hit) { const c = JSON.parse(hit); if (c && typeof c.canEdit === 'boolean') return c; }
+  } catch (e) { /* a cache problem costs one call, never the check */ }
+
+  let r;
+  try {
+    r = gxCorePost_('verify', { token: t, app: 'sales' }, false);
+  } catch (e) {
+    return { role: null, canEdit: false, err: errText_(e) };
+  }
+  let out;
+  if (r.ok === true && r.role) out = { role: String(r.role), canEdit: r.canEdit === true, err: null };
+  else if (r.ok === true)      return { role: null, canEdit: false, err: 'GX Core verified the session but named no role' };
+  else if (r.code === 'no_access') out = { role: null, canEdit: false, err: null };
+  else return { role: null, canEdit: false, err: 'GX Core did not accept the session (' + String(r.code || r.error || 'no reason') + ')' };
+  try { if (key) cacheSet_(key, JSON.stringify(out), CORE_ROLE_TTL_S_); } catch (e) {}
+  return out;
+}
+
 /* The store vocabulary, from the shared registry rather than from the keys of a local credential
    map. That map was doubling as the store list, so a stale label silently became a store this app
    believed in. Cached per execution; a GAS execution is short-lived. */
@@ -659,37 +735,24 @@ const GX_WRITE_GUARD_LOG = 'GX_WRITE_GUARD_LOG';  // capped ring — history tab
 const GX_WRITE_GUARD_CAP = 25;
 const GX_WRITE_GUARD_TALLY = 'GX_WRITE_GUARD_TALLY';  // monotonic counters — survive the ring rolling
 
-function writeGuard_(user, action) {
+/* `auth` is requireAuth_'s answer: the user, and the session that proved it, which Core's verify needs.
+   Held in-process only; it is never returned to a caller. */
+function writeGuard_(auth, action) {
+  const user = (auth && auth.user) || '', token = (auth && auth.token) || '';
   const props = PropertiesService.getScriptProperties();
   const mode  = props.getProperty(GX_WRITE_GUARD_KEY) || 'log';
   if (mode === 'off') return { ok: true, mode: mode };
-
-  let role = null, err = null;
-  try {
-    role = (typeof GXCore !== 'undefined' && GXCore && typeof GXCore.roleForApp === 'function')
-      ? GXCore.roleForApp(String(user || '').toLowerCase().trim(), 'sales')
-      : null;
-    if (!role && typeof GXCore.roleForApp !== 'function') err = 'roleForApp unavailable at this pin';
-  } catch (e) {
-    err = e.message;
-  }
 
   // HOLDING A ROLE IS NOT PERMISSION TO WRITE. Until 2026-09-14 this asked only whether the user had
   // ANY Sales role, so a `viewer` grant admitted every write in `enforce` — revenue lines, budgets,
   // reconciliation. Measured live before the fix: GX Core's read-only dev session (role viewer) got
   // past this guard on set_recon and was stopped only by a deliberately invalid date.
-  // The edit test is GXCore.roleCanEdit, never a local list (suite rule: an allowlist in one place,
-  // unknown roles fail safe to read-only). A pin without it cannot tell editor from viewer, so it
-  // counts as a Core error and fails closed like one.
-  let canEdit = false;
-  if (role && !err) {
-    try {
-      if (typeof GXCore.roleCanEdit !== 'function') err = 'roleCanEdit unavailable at this pin';
-      else canEdit = !!GXCore.roleCanEdit(role);
-    } catch (e) {
-      err = e.message;
-    }
-  }
+  // The edit test is Core's roleCanEdit, never a local list (suite rule: an allowlist in one place,
+  // unknown roles fail safe to read-only). Since slice 6 it arrives as `canEdit` on Core's live verify
+  // answer (coreRoleForSession_) instead of a pinned library call; a Core that cannot answer is an
+  // error and fails closed in enforce.
+  const rr = coreRoleForSession_(token);
+  const role = rr.role, err = rr.err, canEdit = !err && !!rr.role && rr.canEdit === true;
 
   recordGuard_(props, { user: user, action: action, role: role || null, can_edit: canEdit, err: err || null });
 
@@ -737,7 +800,11 @@ function recordGuard_(props, entry) {
  * array this reads, so a fourth way to present one is protected the moment it is accepted. Do not
  * reach for `params.token` here or anywhere else. */
 function requireAuth_(params) {
-  return validateSessionToken_(authParamValue_(params));
+  const token = authParamValue_(params);
+  const v = validateSessionToken_(token);
+  // The session rides along for writeGuard_'s grant check at Core (slice 6). In-process only.
+  if (v.ok) v.token = token;
+  return v;
 }
 
 // Phase-2 shared sign-on: validate through GXCore (which checks app access grant),
@@ -749,12 +816,11 @@ function requireAuth_(params) {
 // list Core cannot see. There is no fallback now, including for an outage: this app shows nothing without
 // GX Core (stores, settled sales, goals all come from it), and sessions already issued are unaffected
 // because tokens are validated here against the shared secret.
+// Since slice 6 this asks Core's live login route (gxCorePost_), not the pinned library, so a sign-in
+// change in Core reaches Sales without a re-pin. The password travels in a POST body, never a URL.
 function loginUser(params) {
-  if (typeof GXCore === 'undefined' || !GXCore || typeof GXCore.login !== 'function') {
-    return { ok: false, error: 'Sign-in unavailable — GX Core is not connected', code: 'unavailable' };
-  }
   try {
-    return GXCore.login(params.user, params.pass, 'sales');
+    return gxCorePost_('login', { user: params.user, pass: params.pass, app: 'sales' }, false);
   } catch (e) {
     Logger.log('[Sales login/GXCore] ' + e.message);
     return { ok: false, error: 'Sign-in unavailable — GX Core did not answer. Try again in a minute.', code: 'unavailable' };
@@ -769,16 +835,10 @@ function loginUser(params) {
 function pingSession_(params) {
   const pAuth = requireAuth_(params);
   if (!pAuth.ok) return { ok: false, error: pAuth.error };
-  let role = null, checked = false;
-  try {
-    if (typeof GXCore !== 'undefined' && GXCore && typeof GXCore.roleForApp === 'function') {
-      role = GXCore.roleForApp(String(pAuth.user || '').toLowerCase().trim(), 'sales');
-      checked = true;
-    }
-  } catch (e) {
-    Logger.log('[Sales ping/roleForApp] ' + e.message);
-  }
-  if (checked && !role) return { ok: false, error: 'No access to Sales', code: 'no_access' };
+  // Core's live verify route (coreRoleForSession_): only a definitive "no access" refuses the renewal.
+  const rr = coreRoleForSession_(authParamValue_(params));
+  if (rr.err) Logger.log('[Sales ping/verify] ' + rr.err);
+  if (!rr.err && !rr.role) return { ok: false, error: 'No access to Sales', code: 'no_access' };
   const newExp = Date.now() + GC_SESSION_TTL_MS;
   const payload = pAuth.user + ':' + newExp;
   return { ok: true, token: payload + ':' + signSession_(payload), expiresAt: new Date(newExp).toISOString() };
@@ -803,7 +863,7 @@ function doGet(e) {
     const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
     if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
     try {
-      const r = GXCore.login(params.user || '__probe__', params.pass || '__probe__', 'sales');
+      const r = gxCorePost_('login', { user: params.user || '__probe__', pass: params.pass || '__probe__', app: 'sales' }, false);
       return jsonOut_({ gxcore: { ok: r.ok, user: r.user, role: r.role, error: r.error, hasToken: !!r.token } });
     } catch(e) {
       return jsonOut_({ gxcore: null, error: errText_(e) });
@@ -1410,7 +1470,7 @@ function doGet(e) {
   if (params.action === 'period_goals') return getPeriodGoalsForDate_(params.date);
   if (params.action === 'period_goals_range') return getPeriodGoalsRange_(params.start, params.end);
   if (params.action === 'pace')        return getPacingFracs_();
-  if (params.action === 'save_expense_mapping') { const g = writeGuard_(auth.user, 'save_expense_mapping'); if (!g.ok) return jsonOut_(g); return saveExpenseMapping_(params); }
+  if (params.action === 'save_expense_mapping') { const g = writeGuard_(auth, 'save_expense_mapping'); if (!g.ok) return jsonOut_(g); return saveExpenseMapping_(params); }
   if (params.action === 'expenses')    return getExpenses(params);
   if (params.action === 'pnl')         return getPnl(params);
   if (params.action === 'expense_breakdown') return getExpenseBreakdown(params);
@@ -1420,15 +1480,15 @@ function doGet(e) {
   if (params.action === 'cogs_dutchie')  return jsonOut_(getCogsDutchie(params));
   if (params.action === 'expbudgets')    return getExpenseBudgets();
   if (params.action === 'otherrev')       return getOtherRevenue();
-  if (params.action === 'set_otherrev')   { const g = writeGuard_(auth.user, 'set_otherrev'); if (!g.ok) return jsonOut_(g); return setOtherRevenue(params); }
+  if (params.action === 'set_otherrev')   { const g = writeGuard_(auth, 'set_otherrev'); if (!g.ok) return jsonOut_(g); return setOtherRevenue(params); }
   if (params.action === 'revenue_detail') return getRevenueDetail(params);
-  if (params.action === 'set_revenue')    { const g = writeGuard_(auth.user, 'set_revenue'); if (!g.ok) return jsonOut_(g); return setRevenueLine(params); }
-  if (params.action === 'set_atm_paid')    { const g = writeGuard_(auth.user, 'set_atm_paid'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return setAtmPaid_(params); }
+  if (params.action === 'set_revenue')    { const g = writeGuard_(auth, 'set_revenue'); if (!g.ok) return jsonOut_(g); return setRevenueLine(params); }
+  if (params.action === 'set_atm_paid')    { const g = writeGuard_(auth, 'set_atm_paid'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return setAtmPaid_(params); }
   if (params.action === 'budget_proposal') return getBudgetProposal(params);
-  if (params.action === 'apply_budget')    { const g = writeGuard_(auth.user, 'apply_budget'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return applyBudget_(params); }
-  if (params.action === 'clear_budget')    { const g = writeGuard_(auth.user, 'clear_budget'); if (!g.ok) return jsonOut_(g); return clearBudget_(params); }
-  if (params.action === 'set_bills_once')  { const g = writeGuard_(auth.user, 'set_bills_once'); if (!g.ok) return jsonOut_(g); return setBillsOnce_(params); }
-  if (params.action === 'clear_atm_cache') { const g = writeGuard_(auth.user, 'clear_atm_cache'); if (!g.ok) return jsonOut_(g); return clearAtmCache_(params, auth.user); }
+  if (params.action === 'apply_budget')    { const g = writeGuard_(auth, 'apply_budget'); if (!g.ok) return jsonOut_(g); params._user = auth.user; return applyBudget_(params); }
+  if (params.action === 'clear_budget')    { const g = writeGuard_(auth, 'clear_budget'); if (!g.ok) return jsonOut_(g); return clearBudget_(params); }
+  if (params.action === 'set_bills_once')  { const g = writeGuard_(auth, 'set_bills_once'); if (!g.ok) return jsonOut_(g); return setBillsOnce_(params); }
+  if (params.action === 'clear_atm_cache') { const g = writeGuard_(auth, 'clear_atm_cache'); if (!g.ok) return jsonOut_(g); return clearAtmCache_(params, auth.user); }
   if (params.action === 'velocity')      return jsonOut_(getVelocity_(params));
   if (params.action === 'inventory')     return getInventory(params);
   if (params.action === 'invprobe')      return probeInventoryEndpoints(params);
@@ -1438,9 +1498,9 @@ function doGet(e) {
   if (params.action === 'reportbug')     return reportBug_(params, auth.user);
   if (params.action === 'deposits')      return getDeposits(params);
   if (params.action === 'recon_config')  return getReconConfig(params);
-  if (params.action === 'set_recon_config') { const g = writeGuard_(auth.user, 'set_recon_config'); if (!g.ok) return jsonOut_(g); return setReconConfig_(params); }
-  if (params.action === 'set_recon')        { const g = writeGuard_(auth.user, 'set_recon');        if (!g.ok) return jsonOut_(g); return setRecon_(params, auth.user); }
-  if (params.action === 'set_recon_assign') { const g = writeGuard_(auth.user, 'set_recon_assign'); if (!g.ok) return jsonOut_(g); return setReconAssign_(params); }
+  if (params.action === 'set_recon_config') { const g = writeGuard_(auth, 'set_recon_config'); if (!g.ok) return jsonOut_(g); return setReconConfig_(params); }
+  if (params.action === 'set_recon')        { const g = writeGuard_(auth, 'set_recon');        if (!g.ok) return jsonOut_(g); return setRecon_(params, auth.user); }
+  if (params.action === 'set_recon_assign') { const g = writeGuard_(auth, 'set_recon_assign'); if (!g.ok) return jsonOut_(g); return setReconAssign_(params); }
 
   const store = params.store;
   const from  = params.from;
@@ -1469,7 +1529,7 @@ function doPost(e) {
   let body = {};
   try { body = JSON.parse(e.postData.contents || '{}'); } catch(err) {}
 
-  if (params.action === 'save_expense_mapping') { const g = writeGuard_(auth.user, 'save_expense_mapping:POST'); if (!g.ok) return jsonOut_(g); return saveExpenseMapping_(body); }
+  if (params.action === 'save_expense_mapping') { const g = writeGuard_(auth, 'save_expense_mapping:POST'); if (!g.ok) return jsonOut_(g); return saveExpenseMapping_(body); }
   return jsonOut_({ ok: false, error: 'Unknown POST action: ' + params.action });
 }
 
@@ -5080,7 +5140,10 @@ function reportBug_(params, reporter) {
     try { ctxObj = JSON.parse(ctx) || {}; } catch (e) { ctxObj = {}; }
     const ctxTab = String(ctxObj.tab || '');
 
-    const r = GXCore.gxIngestBug('sales', reporter, {
+    // Core's live ingest_bug route (slice 6), not the pinned library: the same gxIngestBug, run at
+    // Core's current version and under Core's lock and mail quota. POST, so the context and the
+    // deploy secret stay out of the URL.
+    const r = gxCorePost_('ingest_bug', Object.assign({ app: 'sales', reporter: reporter }, {
       title, priority, desc,
       appVer:   params.appVer   || '',
       appStore: params.appStore || '',
@@ -5099,7 +5162,7 @@ function reportBug_(params, reporter) {
        * hand-maintained copy of a contract that lives somewhere else. */
       screenshot_url: params.screenshot_url || '',
       context:  ctx
-    });
+    }), true);
     if (!r || !r.ok) return jsonOut_({ ok: false, error: (r && r.error) || 'bug report was not saved' });
 
     /* THE ROW IS DOWN AND NOBODY WAS TOLD — the one failure nothing anywhere observes.

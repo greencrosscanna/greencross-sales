@@ -57,14 +57,18 @@ const ok = (msg, cond) => { if (cond) { pass++; console.log('  ok   ' + msg); }
 // ── harness: run the shipped reportBug_ with gxIngestBug and jsonOut_ captured ──────────────────
 function run(params, opts) {
   opts = opts || {};
-  const seen = { payload: null, app: null, reporter: null, out: null, threw: null };
+  const seen = { payload: null, app: null, reporter: null, out: null, threw: null, action: null, withSecret: null };
   const ctx = {
     console,
-    GXCore: { gxIngestBug: function (app, reporter, payload) {
-      seen.app = app; seen.reporter = reporter; seen.payload = payload;
+    // Since slice 6 reportBug_ files through Core's LIVE ingest_bug route (gxCorePost_), not the
+    // pinned library. The route hands the same body to Core's gxIngestBug(p.app, p.reporter, p).
+    gxCorePost_: function (action, body, withSecret) {
+      seen.action = action; seen.withSecret = withSecret;
+      seen.app = body.app; seen.reporter = body.reporter; seen.payload = body;
       if (opts.ingestThrows) throw new Error('core exploded');
       return opts.ingestResult || { ok: true, id: 'bug_test' };
-    } },
+    },
+    GXCore: { gxIngestBug: function () { throw new Error('the pinned library must not be asked'); } },
     jsonOut_: function (o) { seen.out = o; return o; }
   };
   vm.createContext(ctx);
@@ -92,7 +96,11 @@ const sharedFormPayload = (over) => Object.assign({
 console.log('\n── the shared form\'s real payload ──');
 {
   const s = run(sharedFormPayload());
+  ok('files through Core\'s live ingest_bug route, with the deploy secret', s.action === 'ingest_bug' && s.withSecret === true);
   ok('files under app "sales"',                    s.app === 'sales');
+  const f = run(sharedFormPayload({ reporter: 'mallory', app: 'inventory' }));
+  ok('a form that names another reporter or app cannot override the session or the app',
+     f.reporter === 'sky' && f.app === 'sales');
   ok('reporter is the session user, not the form', s.reporter === 'sky');
   ok('returns ok',                                 s.out && s.out.ok === true);
   ok('context REACHES gxIngestBug',                !!(s.payload && s.payload.context));

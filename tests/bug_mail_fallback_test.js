@@ -111,11 +111,13 @@ function session(opts) {
     /* `ingest` is what gxIngestBug returns for THIS call — the whole surface under test. */
     file: function (ingest, over) {
       let seenPayload = null;
-      ctx.GXCore = { gxIngestBug: function (app, reporter, payload) {
-        seenPayload = payload;
+      // Since slice 6: Core's live ingest_bug route via gxCorePost_, not the pinned library.
+      ctx.gxCorePost_ = function (action, body) {
+        seenPayload = body;
+        if (action !== 'ingest_bug') throw new Error('unexpected route ' + action);
         if (ingest instanceof Error) throw ingest;
         return ingest;
-      } };
+      };
       const out = ctx.reportBug_(payload(over), 'sky');
       return { out: out, payload: seenPayload };
     }

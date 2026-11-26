@@ -310,11 +310,21 @@ Hist: "IncludeDetail" · "pulled ONCE" · "Today's hop" · "Phones don't poll" �
 - **The browser too:** `?action=stores` carries `data_source`; with `api`, `lbGoalsFromApi_` reads
   Leaderboard's published goals from gx-api first (copy age ADDED to the payload's age, same 30h and
   this-month guards) and returns null so `fetchPublishedGoals` goes on to Core unchanged.
-- **Still on the library, on purpose:** sign-in/roles (`login`, `roleForApp`, `roleCanEdit`), bug
-  filing (`gxIngestBug`), `libVersion`, and `salesFromTxns` (today's figure on the Core fallback path).
-  QuickBooks stays on Core's routes.
+- **Sign-in, roles and bug filing use Core's LIVE routes (slice 6, 2026-11-25), switch or not:**
+  `gxCorePost_` POSTs JSON (text/plain) to Core's `/exec` — `login`, `verify` (the grant check for
+  `writeGuard_` and the 10-minute renewal, cached 60s per session hash, errors never cached) and
+  `ingest_bug` (secret). A password, session or secret never goes in a URL. `writeGuard_` now takes
+  requireAuth_'s whole answer (`writeGuard_(auth, 'action')`), because verify needs the session. A
+  Core sign-in or role fix reaches Sales with no re-pin. Never call `GXCore.login/roleForApp/
+  roleCanEdit/gxIngestBug` again (`write_guard_test` §4 fails if one appears; authprobe's diagnostic
+  aside).
+- **Still on the library, on purpose:** the switch-OFF data path (`coreDataLib_`, `getSalesDaily`),
+  `salesFromTxns` (today's figure on the Core fallback path), and `libVersion` diagnostics. After the
+  flip those only run on a fallback, so a re-pin is needed only to fix the fallback. QuickBooks stays
+  on Core's routes.
 
-Tests: `gx_api_settled`, `gx_api_today`, `gx_api_core`, `bg_refresh` (switch-on section).
+Tests: `gx_api_settled`, `gx_api_today`, `gx_api_core`, `bg_refresh` (switch-on section),
+`write_guard`, `login_core_only`, `bug_context_forward`, `bug_mail_fallback`.
 
 ## `/exec` stalls — Google's hop, not ours
 

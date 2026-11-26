@@ -191,6 +191,76 @@ function gxCorePost_(action, body, withSecret) {
   throw new Error('GX Core ' + action + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
 }
 
+/* ─── GX CORE DATA, OVER ITS LIVE ROUTES — THE LIBRARY IS GONE (roadmap [5] slice 7) ─────────────
+ *
+ * Sales used to read the store registry, period goals, past days and velocity as GXCore.x() library
+ * calls. A library call runs the version this app PINS, so a Core data fix reached Sales only after a
+ * re-pin and a deploy here. These read Core's /exec, which runs Core's current code. Nothing in Sales
+ * binds the library any more (appsscript.json has no dependencies).
+ *
+ * POST, secret in the body (never the URL), same as gxCorePost_. Unlike gxCorePost_ the answer need
+ * not carry `ok`: Core's period_goals route answers one store with the bare goal row, or `null` when
+ * there is none, exactly what getPeriodGoals returned. A JSON `null` is an ANSWER here; only a body
+ * that does not parse (the /exec bounce) is retried.
+ *
+ * Throws on a refusal ({ok:false}) — for data, a refusal is an error, never an empty answer — and
+ * when Core did not answer within the retry budget. */
+function gxCoreData_(action, body, opts) {
+  const payload = Object.assign({}, body || {}, { action: action });
+  if (!(opts && opts.public)) payload.secret = gxDeploySecret_();
+  const req = { method: 'post', contentType: 'text/plain', payload: JSON.stringify(payload),
+                muteHttpExceptions: true, followRedirects: true };
+  let lastErr = '', stopped = '', tries = 0;
+  const started = Date.now();
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) { stopped = gxRetryHold_(started, 300); if (stopped) break; }   // see GXCORE_RETRY_BUDGET_MS
+    tries++;
+    let parsed = false, data;
+    try {
+      const resp = UrlFetchApp.fetch(GXCORE_EXEC_, req);
+      try { data = JSON.parse(resp.getContentText()); parsed = true; }
+      catch (e) { lastErr = 'unparseable body (HTTP ' + resp.getResponseCode() + ')'; }
+    } catch (e) {
+      lastErr = errText_(e);
+    }
+    if (!parsed) continue;
+    if (data && data.ok === false) throw new Error('GX Core ' + action + ': ' + (data.error || data.code || 'refused'));
+    return data;
+  }
+  throw new Error('GX Core ' + action + ' unreachable after ' + tries + ' tries — ' + lastErr + stopped);
+}
+
+/* The same, for several reads in PARALLEL (UrlFetchApp.fetchAll), each retried on its own. Returns
+ * one entry per body, in order: { ok: true, data } or { ok: false, error }. Never throws — the caller
+ * decides whether one missing answer spoils the set (for velocity it does: a missing store would read
+ * as a store selling nothing). */
+function gxCoreDataAll_(action, bodies) {
+  const out = bodies.map(function () { return { ok: false, error: 'not asked' }; });
+  const reqFor = function (b) {
+    return { url: GXCORE_EXEC_, method: 'post', contentType: 'text/plain', muteHttpExceptions: true, followRedirects: true,
+             payload: JSON.stringify(Object.assign({}, b || {}, { action: action, secret: gxDeploySecret_() })) };
+  };
+  let pending = bodies.map(function (b, i) { return i; });
+  const started = Date.now();
+  for (let round = 0; round < 3 && pending.length; round++) {
+    if (round > 0 && gxRetryHold_(started, 300)) break;                         // see GXCORE_RETRY_BUDGET_MS
+    let resps = null;
+    try { resps = UrlFetchApp.fetchAll(pending.map(function (i) { return reqFor(bodies[i]); })); }
+    catch (e) { pending.forEach(function (i) { out[i] = { ok: false, error: errText_(e) }; }); continue; }
+    const again = [];
+    pending.forEach(function (i, k) {
+      let data, parsed = false;
+      try { data = JSON.parse(resps[k].getContentText()); parsed = true; }
+      catch (e) { out[i] = { ok: false, error: 'unparseable body (HTTP ' + resps[k].getResponseCode() + ')' }; }
+      if (!parsed) { again.push(i); return; }
+      if (data && data.ok === false) { out[i] = { ok: false, error: String(data.error || data.code || 'refused'), refused: true }; return; }
+      out[i] = { ok: true, data: data };
+    });
+    pending = again;
+  }
+  return out;
+}
+
 /* This session's Sales role, from GX Core's verify route — the same check every spoke backend uses
  * ("may this token act in my app?"). It re-checks the GRANT, not only the signature, and its canEdit
  * is Core's own roleCanEdit, so the editor/viewer line is drawn in one place.
@@ -903,8 +973,9 @@ function doGet(e) {
     const secret = PropertiesService.getScriptProperties().getProperty('GX_DEPLOY_SECRET') || '';
     if (!secret || params.secret !== secret) return jsonOut_({ ok: false, error: 'Forbidden' });
     try {
-      if (typeof GXCore === 'undefined' || !GXCore) return jsonOut_({ ok: false, error: 'GXCore binding missing' });
-      // libVersion() landed in Core v153. Its absence is not an error — it dates the pin as older than that.
+      // UNBOUND since slice 7: Sales pins no GXCore library version, so there is no version to report.
+      // gxcore_version stays null (never Core's live number — a tool reading it would record a pin that
+      // does not exist). What Sales talks to is Core's /exec, whose version is Core's ?action=health.
       const props = PropertiesService.getScriptProperties();
       // Which connector actually served the last uncached Expenses load, and whether the precondition
       // for using Core at all is even in place. qb_last_source is stamped by getExpenses on a cache miss.
@@ -912,10 +983,8 @@ function doGet(e) {
         secret_configured: !!secret,
         last_source: props.getProperty('QB_LAST_SOURCE') || null   // 'gxcore@<iso>' | 'local@<iso>' | null
       };
-      if (typeof GXCore.libVersion !== 'function') {
-        return jsonOut_({ ok: true, app: 'sales', gxcore_version: null, qb: qb, note: 'pinned Core predates libVersion() (added v153)' });
-      }
-      return jsonOut_({ ok: true, app: 'sales', gxcore_version: GXCore.libVersion(), qb: qb });
+      return jsonOut_({ ok: true, app: 'sales', gxcore_version: null, bound: false, qb: qb,
+                        note: 'not bound to the GXCore library — reads GX Core over its live routes' });
     } catch (e) {
       return jsonOut_({ ok: false, error: errText_(e) });
     }
@@ -926,14 +995,11 @@ function doGet(e) {
   // cost nothing to ask right after a deploy, or nobody runs it. An old pin IDENTIFIES ITSELF here
   // rather than throwing, so the diagnostic still answers when it is most needed. Leaks one integer,
   // and Core's own action=health already publishes the matching side.
+  // Unbound since slice 7. Still answers (ok:true, JSON) because ./gxengine.sh asks this route to
+  // tell "the engine is up" from "the engine throws on every request". `gxcore` is null on purpose:
+  // gxengine records any NUMBER here as the library version the app runs, and there is none.
   if (params.action === 'libversion') {
-    try {
-      if (typeof GXCore === 'undefined' || !GXCore) return jsonOut_({ ok: false, error: 'GXCore not bound' });
-      if (typeof GXCore.libVersion !== 'function') return jsonOut_({ ok: false, error: 'pinned GXCore has no libVersion() - pre-v153' });
-      return jsonOut_({ ok: true, gxcore: GXCore.libVersion() });
-    } catch (e) {
-      return jsonOut_({ ok: false, error: errText_(e) });
-    }
+    return jsonOut_({ ok: true, app: 'sales', gxcore: null, bound: false });
   }
 
   // Two facts this app cannot settle by inspection, both secret-gated like gxpin.
@@ -977,33 +1043,16 @@ function doGet(e) {
     } catch (e) {
       out.local_users_error = e.message;
     }
-    // WHAT CAN THIS PIN ACTUALLY CALL? Asked because the grant question above is unanswerable from
-    // outside Core — no HTTP route enumerates who holds a grant — but we are a BOUND spoke, so
-    // anything public on the library is callable from in here. Listing the surface says whether a
-    // user/grant listing function exists at our pin instead of guessing route names over HTTP.
-    if (params.surface) {
-      try {
-        out.gxcore_surface = Object.keys(GXCore).sort();
-      } catch (e) {
-        out.gxcore_surface_error = e.message;
-      }
-    }
+    // (The library surface listing and the roleForApp check that lived here went with the library
+    // binding in slice 7. A real session's role is asked with Core's verify route — writeGuard_ — and
+    // its decisions are the write_guard_log below.)
+    out.gxcore_bound = false;
     try {
       out.write_guard_mode = props0.getProperty(GX_WRITE_GUARD_KEY) || 'log';
       out.write_guard_log  = JSON.parse(props0.getProperty(GX_WRITE_GUARD_LOG) || '[]');
       out.write_guard_tally = JSON.parse(props0.getProperty(GX_WRITE_GUARD_TALLY) || '{}');
     } catch (e) {
       out.write_guard_error = e.message;
-    }
-    try {
-      out.gxcore_version  = (typeof GXCore !== 'undefined' && GXCore && typeof GXCore.libVersion === 'function') ? GXCore.libVersion() : null;
-      out.has_roleForApp  = !!(typeof GXCore !== 'undefined' && GXCore && typeof GXCore.roleForApp === 'function');
-      if (out.has_roleForApp && params.user) {
-        const u = String(params.user).toLowerCase().trim();
-        out.role_for_user = { user: u, role: GXCore.roleForApp(u, 'sales') };
-      }
-    } catch (e) {
-      out.gxcore_error = e.message;
     }
     return jsonOut_(out);
   }
@@ -1543,8 +1592,9 @@ function doPost(e) {
  * Dutchie Closing Report GX Core does and checks itself against GX Core's Sheets cache to the cent
  * every morning. This switch lets Sales read from it.
  *
- *   SALES_DATA_SOURCE unset or 'sheets'   GXCore.getSalesDaily, exactly as before (the default)
- *   SALES_DATA_SOURCE = 'api'             gx-api, falling back to GXCore.getSalesDaily on ANY doubt
+ *   SALES_DATA_SOURCE unset or 'sheets'   GX Core's getSalesDaily, via its sales_rows route (the default)
+ *   SALES_DATA_SOURCE = 'api'             gx-api, falling back to GX Core's sales_rows on ANY doubt
+ * (Until slice 7 the GX Core side was the GXCore.getSalesDaily library call; same function, same rows.)
  *
  * Flip it with ?action=datasource&set=api|sheets&secret=… — no deploy, so the rollback is one call.
  *
@@ -1596,7 +1646,7 @@ function settledSalesRows_(store, from, to) {
       probeMark_('settled_api_fallback', Date.now() - t0, { why: errText_(e) });
     }
   }
-  return GXCore.getSalesDaily(store, from, to) || [];
+  return coreSalesRowsLive_(store, from, to);
 }
 
 /* ─── TODAY FROM gx-api — same switch, same rule: any doubt goes back to the old path ────────────
@@ -1660,13 +1710,14 @@ function todayViaApi_(labels, maxAgeS, todayPT) {
  * The store registry, store-name resolution, period goals, today's pace curves and product velocity.
  * With SALES_DATA_SOURCE = 'api' they come from gx-api, which copies GX Core's own answers on a clock
  * (and answers goals/resolution with line-for-line ports of Core's logic, tested side by side with
- * Core's real functions in the hub). Unset or 'sheets': exactly the old calls, nothing else runs.
+ * Core's real functions in the hub). Unset or 'sheets': GX Core's own answer (coreDataCore_) —
+ * since slice 7 over Core's live routes, no longer the pinned library:
  *
- *   coreData_('stores')                    GXCore.getStores()
- *   coreData_('resolveStore', name)        GXCore.resolveStore(name)
- *   coreData_('periodGoals', store, date)  GXCore.getPeriodGoals(store, date)
- *   coreData_('velocity', '')              GXCore.getVelocity('')
- *   coreData_('hourlyShape', 'a,b')        GX Core ?action=hourly_shape&stores=a,b
+ *   coreData_('stores')                    Core ?action=stores            (was GXCore.getStores)
+ *   coreData_('resolveStore', name)        Core's resolver, run here      (was GXCore.resolveStore)
+ *   coreData_('periodGoals', store, date)  Core ?action=period_goals      (was GXCore.getPeriodGoals)
+ *   coreData_('velocity', '')              Core ?action=velocity_rows ×N  (was GXCore.getVelocity)
+ *   coreData_('hourlyShape', 'a,b')        Core ?action=hourly_shape&stores=a,b
  *
  * THE FALLBACK IS THE SAFETY PROPERTY, as for past days: gx-api's answer is used only when it is a
  * 200, ok, young enough, and complete. Anything else — a copy older than its limit, a store missing
@@ -1674,8 +1725,8 @@ function todayViaApi_(labels, maxAgeS, todayPT) {
  * ledger (the copy may simply not have the newest period yet), "unknown store" — goes to the old call,
  * with a `core_api_fallback` probe mark saying why. Asking twice is the cost; a wrong answer is not.
  *
- * This is the ONLY place the GXCore data functions are called (gx_api_core_test checks). Sign-in,
- * roles, bug filing and library diagnostics stay on the library — they are not data. */
+ * This is the ONLY door to GX Core data (gx_api_core_test checks). Sign-in, roles and bug filing use
+ * Core's live routes too (gxCorePost_, slice 6); nothing calls the library. */
 const CORE_API_MAX_AGE_S_ = { stores: 7200, period_goals: 3600, velocity: 8 * 3600 };
 
 function coreData_(what, a, b) {
@@ -1685,16 +1736,157 @@ function coreData_(what, a, b) {
     try { v = coreDataApi_(what, a, b); } catch (e) { v = undefined; probeMark_('core_api_fallback', Date.now() - t0, { what: what, why: errText_(e) }); }
     if (v !== undefined) { probeMark_('core_source_api', Date.now() - t0, { what: what }); return v; }
   }
-  return coreDataLib_(what, a, b);
+  return coreDataCore_(what, a, b);
 }
 
-function coreDataLib_(what, a, b) {
-  if (what === 'stores')       return GXCore.getStores();
-  if (what === 'resolveStore') return GXCore.resolveStore(a);
-  if (what === 'periodGoals')  return GXCore.getPeriodGoals(a, b);
-  if (what === 'velocity')     return GXCore.getVelocity(a);
+/* GX Core's own answer, over its live routes (slice 7 — these were GXCore.x() library calls).
+ *
+ *   stores        ?action=stores (public)          the published registry — cached, see coreStoresLive_
+ *   resolveStore  no route; Core's resolver run here over that registry (coreResolveStore_)
+ *   periodGoals   ?action=period_goals             getPeriodGoals itself, cached 10 min per (store, date)
+ *   velocity      ?action=velocity_rows, per store all stores in parallel, all or nothing
+ *   hourlyShape   ?action=hourly_shape             unchanged
+ *
+ * Each was an in-process call and is now an /exec hop, so every one that a page load reaches is
+ * cached; velocity and the store registry already were one level up. */
+function coreDataCore_(what, a, b) {
+  if (what === 'stores')       return coreStoresLive_();
+  if (what === 'resolveStore') return coreResolveStore_(a, coreStoresLive_());
+  if (what === 'periodGoals')  return corePeriodGoalsLive_(a, b);
+  if (what === 'velocity')     return coreVelocityLive_(a);
   if (what === 'hourlyShape')  return gxCoreRoute_('hourly_shape', { stores: a });
   throw new Error('coreData_: unknown read ' + what);
+}
+
+/* THE STORE REGISTRY — read on nearly every request (every store gate), so it must not cost a hop
+ * each time. Two cache entries:
+ *   fresh  10 min   Core's own route caches 5 min; a store added in Command Center shows within ~15.
+ *   last   6 h      ONLY when Core cannot be reached. A registry outage used to be a library sheet read
+ *                   that essentially never failed; an /exec hop fails ~6% of the time, and every store
+ *                   gate would turn that into a refused load. The last good registry is a real answer
+ *                   Core gave, not a guess, and the probe mark says it was used.
+ * Nothing ever answers with an EMPTY registry: no copy at all still throws, as before. */
+const CORE_STORES_FRESH_ = { key: 'corestores_v1', ttl: 600 };
+const CORE_STORES_LAST_  = { key: 'corestores_last_v1', ttl: 21600 };
+
+function coreStoresLive_() {
+  const goodRows = function (rows) {
+    return Array.isArray(rows) && rows.length && rows.every(function (s) { return s && s.store_id && s.dutchie_name; });
+  };
+  try { const hit = cacheGet_(CORE_STORES_FRESH_.key); if (hit) { const r = JSON.parse(hit); if (goodRows(r)) return r; } } catch (e) {}
+  let rows;
+  try {
+    const body = gxCoreData_('stores', {}, { public: true });
+    rows = body && body.stores;
+    if (!goodRows(rows)) throw new Error('GX Core stores: no usable rows');
+  } catch (e) {
+    let last = null;
+    try { last = JSON.parse(cacheGet_(CORE_STORES_LAST_.key) || 'null'); } catch (e2) { last = null; }
+    if (goodRows(last)) { probeMark_('core_stores_last_good', 0, { why: errText_(e) }); return last; }
+    throw e;
+  }
+  const s = JSON.stringify(rows);
+  try { cacheSet_(CORE_STORES_FRESH_.key, s, CORE_STORES_FRESH_.ttl); cacheSet_(CORE_STORES_LAST_.key, s, CORE_STORES_LAST_.ttl); } catch (e) {}
+  return rows;
+}
+
+/* Core's gxResolveStore_, run here over the PUBLISHED registry rows — Core has no resolve route.
+ * Same tiers, same order: store_id outright, then display name / Dutchie name / alias, then the OLCC
+ * license (full, or a unique 4+ digit suffix), then the folded fallback (Road→Rd, punctuation), where
+ * an ambiguous fold is null, never the first hit. The published rows' `aliases` are already Core's
+ * gxStoreAliases_ (display and Dutchie names folded in). gx-api carries the same port
+ * (api/src/lib.js resolveStoreRow); tests/store_resolve_contract_test.js runs THIS one against Core's
+ * real function on Core's real registry shape. */
+function coreSlug_(s) { return String(s || '').trim().toLowerCase(); }
+function coreStoreToken_(s) {
+  return String(s || '').toLowerCase()
+    .replace(/\broad\b/g, 'rd').replace(/\bstreet\b/g, 'st')
+    .replace(/[^a-z0-9]+/g, ' ').trim()
+    .replace(/\s+(rd|st)$/, '');
+}
+function coreLicenseKey_(v) {
+  const digits = String(v == null ? '' : v).replace(/[^0-9]/g, '');
+  return /^0*$/.test(digits) ? '' : digits;
+}
+function coreResolveStore_(arg, stores) {
+  if (!arg) return null;
+  if (typeof arg === 'object' && arg.store_id) arg = arg.store_id;
+  const want = coreSlug_(arg);
+  if (!want) return null;
+  const rows = stores || [];
+  const aliases = function (s) { return Array.isArray(s.aliases) ? s.aliases : []; };
+  const byId = rows.filter(function (s) { return coreSlug_(s.store_id) === want; })[0];
+  if (byId) return byId;
+  const exact = rows.filter(function (s) {
+    return coreSlug_(s.display_name) === want || coreSlug_(s.dutchie_name) === want
+      || aliases(s).some(function (a) { return coreSlug_(a) === want; });
+  })[0];
+  if (exact) return exact;
+  const lic = coreLicenseKey_(arg);
+  if (lic) {
+    const full = rows.filter(function (s) { return coreLicenseKey_(s.olcc_license) === lic; })[0];
+    if (full) return full;
+    if (lic.length >= 4) {
+      const suffix = rows.filter(function (s) { const h = coreLicenseKey_(s.olcc_license); return h.length > lic.length && h.slice(-lic.length) === lic; });
+      if (suffix.length === 1) return suffix[0];
+    }
+  }
+  const tok = coreStoreToken_(arg);
+  if (!tok) return null;
+  const folded = rows.filter(function (s) {
+    return coreStoreToken_(s.store_id) === tok || coreStoreToken_(s.display_name) === tok
+      || coreStoreToken_(s.dutchie_name) === tok || aliases(s).some(function (a) { return coreStoreToken_(a) === tok; });
+  });
+  return folded.length === 1 ? folded[0] : null;
+}
+
+/* Core's getPeriodGoals, verbatim, through its route. One store: the goal row or null. No store: the
+ * {ok, rows, picked} audit shape. Cached 10 minutes per (store, date) — the goal walk and the day
+ * view ask the same questions over and over, and gx-api's copy is allowed an hour. A null ("no goal
+ * for this date") is an answer and is cached too; a failure never is. The whole-ledger read (no store,
+ * no date) is not cached here: pgLedgerIntervals_ caches what it derives from it. */
+const CORE_PG_TTL_S_ = 600;
+function corePeriodGoalsLive_(store, date) {
+  const s = String(store || ''), d = String(date || '');
+  const key = d ? 'corepg_v1_' + s + '|' + d : '';
+  if (key) {
+    try { const hit = cacheGet_(key); if (hit !== null && hit !== undefined && hit !== '') return JSON.parse(hit); } catch (e) {}
+  }
+  const ans = gxCoreData_('period_goals', { store: s, date: d });
+  if (s) {
+    if (ans !== null && !(ans && typeof ans === 'object' && Array.isArray(ans.dow_targets))) throw new Error('GX Core period_goals: unrecognized answer for one store');
+  } else if (!ans || ans.ok !== true || !Array.isArray(ans.rows) || !Array.isArray(ans.picked)) {
+    throw new Error('GX Core period_goals: unrecognized answer for all stores');
+  }
+  if (key) { try { cacheSet_(key, JSON.stringify(ans), CORE_PG_TTL_S_); } catch (e) {} }
+  return ans;
+}
+
+/* Core's getVelocity rows. Core's velocity_rows route answers ONE store, so "all stores" is one call
+ * per registry store, in parallel, each retried on its own. ALL OR NOTHING: one store missing would
+ * read as that store selling nothing, which is the silent zero getVelocity_ exists to refuse — so any
+ * store left unanswered throws, and the tile reads "—" until the next try. getVelocity_ caches the
+ * result for an hour, so this runs about once an hour. */
+function coreVelocityLive_(store) {
+  const ids = store ? [String(store)] : coreStoresLive_().map(function (s) { return coreSlug_(s.store_id); }).filter(Boolean);
+  if (!ids.length) throw new Error('GX Core velocity: no stores to ask about');
+  const res = gxCoreDataAll_('velocity_rows', ids.map(function (id) { return { store: id }; }));
+  let rows = [];
+  const missing = [];
+  res.forEach(function (r, i) {
+    if (!r.ok || !r.data || !Array.isArray(r.data.rows)) { missing.push(ids[i] + ' (' + (r.error || 'no rows') + ')'); return; }
+    rows = rows.concat(r.data.rows);
+  });
+  if (missing.length) throw new Error('GX Core velocity missing for ' + missing.join(', '));
+  return rows;
+}
+
+/* Core's getSalesDaily rows (the settled days), through its sales_rows route — the switch-off path of
+ * settledSalesRows_. getStoreSales_ caches the answer an hour, getCogsDutchie ten minutes or six. */
+function coreSalesRowsLive_(store, from, to) {
+  const ans = gxCoreData_('sales_rows', { store: String(store || ''), from: String(from || ''), to: String(to || '') });
+  if (!ans || ans.ok !== true || !Array.isArray(ans.rows)) throw new Error('GX Core sales_rows: unrecognized answer');
+  return ans.rows;
 }
 
 /* One gx-api GET. The parsed body on a 200 that says ok, else null with a mark naming why. */
@@ -1850,7 +2042,7 @@ function getStoreSales_(store, from, to, nocache, phase, maxage) {
           cacheSet_(gasCacheKey, JSON.stringify(cacheRows), 3600);
         } catch(gxErr) {
           // GXCore hiccup — degrade to live-only (today's data still loads below)
-          Logger.log('GXCore.getSalesDaily failed for ' + store + ': ' + gxErr.message);
+          Logger.log('settled sales read failed for ' + store + ': ' + gxErr.message);
         }
       }
     }
@@ -2650,9 +2842,14 @@ function dtodayFromRows_(rows, todayPT) {
    * already read GXCore.getSalesDaily; now the intraday path agrees with it by construction instead of
    * by review.
    *
+   * SINCE SLICE 7 (no library binding) salesFromTxns is Core's function COPIED VERBATIM into
+   * revenue_rules.gs — not a re-written rule. tests/revenue_rules_copy_test.js fails the push if any
+   * of its functions differs from Core's by a single character, so "agrees by construction" still
+   * holds, enforced by a test instead of by the binding.
+   *
    * WHAT STAYS LOCAL: topProducts. That is a per-item display breakdown, not a revenue rule, and Core
    * has no opinion about it. */
-  const totals = GXCore.salesFromTxns(sales);
+  const totals = salesFromTxns(sales);
 
   const dailyMap   = {};
   const productMap = {};
@@ -2681,7 +2878,7 @@ function dtodayFromRows_(rows, todayPT) {
   // One call per DAY, not per transaction — the same rules, applied to each bucket. Reconcile compares
   // deposits to Net Sales + Tax, so both come from the same place the totals do.
   Object.keys(byDay).forEach(function (d) {
-    const t = GXCore.salesFromTxns(byDay[d]);
+    const t = salesFromTxns(byDay[d]);
     dailyMap[d] = { netSales: t.net, grossSales: t.gross, orders: t.orders,
                     discounts: t.discount, cogs: t.cogs, tax: t.tax };
   });
@@ -2755,7 +2952,7 @@ function getStoresMeta_() {
     return ContentService.createTextOutput(gxScrub_(withSource(body))).setMimeType(ContentService.MimeType.JSON);
   } catch(e) {
     // GXCore hiccup — return empty list so frontend keeps its hardcoded fallback colors
-    Logger.log('getStoresMeta_ GXCore.getStores failed: ' + e.message);
+    Logger.log('getStoresMeta_ GX Core store registry failed: ' + e.message);
     return jsonOut_({ stores: [] });
   }
 }

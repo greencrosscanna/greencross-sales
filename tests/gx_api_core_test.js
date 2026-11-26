@@ -37,12 +37,13 @@ function world(source, api) {
       if (r === null) throw new Error('Address unavailable: ' + url);
       return { getResponseCode: () => r.code || 200, getContentText: () => JSON.stringify(r.body) };
     } },
-    GXCore: {
-      getStores: () => { w.lib.push('getStores'); return LIB.stores; },
-      resolveStore: n => { w.lib.push('resolveStore'); return { store_id: 'lib-' + n }; },
-      getPeriodGoals: (s, d) => { w.lib.push('getPeriodGoals'); return s ? LIB.goal : { ok: true, rows: [], picked: [{ from: 'lib' }] }; },
-      getVelocity: () => { w.lib.push('getVelocity'); return [{ store: 'lib' }]; },
-    },
+    // GX Core's live routes (slice 7 — the library is gone). w.lib logs each route asked.
+    ...require('./_core_routes_stub').coreRoutesFrom({
+      getStores: () => LIB.stores,
+      getPeriodGoals: (s, d) => (s ? LIB.goal : { ok: true, rows: [], picked: [{ from: 'lib' }] }),
+      getVelocity: s => [{ store: s }],
+    }, w.lib),
+    ...(function () { const c = require('./_core_routes_stub').memCache(); return { cacheGet_: c.cacheGet_, cacheSet_: c.cacheSet_ }; })(),
     gxCoreRoute_: (a, p) => { w.lib.push('route:' + a); return { ok: true, shapes: { from: 'lib' } }; },
     gxDeploySecret_: () => 'test-secret',
     probeMark_: (label, ms, extra) => w.marks.push({ label, extra }),
@@ -56,11 +57,13 @@ function world(source, api) {
 const mirror = (key, part) => ({ body: { ok: true, source: 'gx-api', parts: { [key]: part } } });
 const why = w => w.marks.filter(m => m.label === 'core_api_fallback').map(m => m.extra.why).join('|');
 
-console.log('\n1. switch off: the library, and not one request to gx-api');
+console.log('\n1. switch off: GX Core\'s own routes, and not one request to gx-api');
 {
   const w = world(null, () => { throw new Error('must not be called'); });
   ok(w.cd('stores') === LIB.stores && w.cd('velocity', '')[0].store === 'lib' && w.cd('periodGoals', 'Bend', '2026-11-25') === LIB.goal,
-     'stores, velocity and goals come from GXCore');
+     'stores, velocity and goals come from GX Core');
+  ok(w.cd('resolveStore', 'LIB').store_id === 'lib' && w.cd('resolveStore', 'Salem') === null,
+     'resolution is Core\'s resolver over Core\'s registry (unknown name: null)');
   ok(w.cd('hourlyShape', 'bend').shapes.from === 'lib', 'pace curves from the GX Core route');
   // Fails if the switch is ignored.
   ok(w.gets.length === 0, 'no gx-api request');
@@ -87,24 +90,24 @@ console.log('\n2. switch on, good answers: gx-api, library untouched');
   // Fails if one store's rows are dropped while concatenating.
   ok(v.length === 2 && v[1].store === 'river-rd', 'velocity: every store\'s rows, joined');
   ok(w.cd('hourlyShape', 'bend,river-rd').shapes['river-rd'][11] === 0.2, 'pace curves from the copy');
-  ok(w.lib.length === 0, 'the library was never called');
+  ok(w.lib.length === 0, 'GX Core was never asked');
   ok(w.gets.every(g => g.headers['x-gx-secret'] === 'test-secret' && !/secret/.test(g.url)), 'secret in a header on every request, never the URL');
 }
 
-console.log('\n3. switch on, any doubt: the library answers — each FAILS if gx-api\'s answer were used');
+console.log('\n3. switch on, any doubt: GX Core itself answers — each FAILS if gx-api\'s answer were used');
 const cases = [
-  ['stores: copy too old (3h)', 'stores', [], p => mirror('stores', { age_s: 3 * 3600, body: { ok: true, stores: STORES } }), 'too_old', 'getStores'],
-  ['stores: no copy yet', 'stores', [], p => mirror('stores', null), 'no_copy', 'getStores'],
-  ['stores: a row without dutchie_name', 'stores', [], p => mirror('stores', { age_s: 60, body: { ok: true, stores: [{ store_id: 'bend' }] } }), 'bad_rows', 'getStores'],
-  ['stores: gx-api down (503)', 'stores', [], p => ({ code: 503, body: { ok: false } }), 'http_503', 'getStores'],
-  ['stores: network error', 'stores', [], p => null, 'Address unavailable', 'getStores'],
-  ['resolve: unknown to the copy', 'resolveStore', ['Salem'], p => ({ body: { ok: true, age_s: 60, store: null } }), 'unknown_to_copy', 'resolveStore'],
-  ['goal: none, date past the copied ledger', 'periodGoals', ['Bend', '2026-12-10'], p => ({ body: { ok: true, age_s: 60, stores_age_s: 60, ledger_end: '2026-12-06', result: null } }), 'no_goal_past_copy', 'getPeriodGoals'],
-  ['goal: copy too old', 'periodGoals', ['Bend', '2026-11-25'], p => ({ body: { ok: true, age_s: 7200, stores_age_s: 60, ledger_end: '2026-12-06', result: { dow_targets: [1] } } }), 'too_old', 'getPeriodGoals'],
-  ['period: nothing picked past the copy', 'periodGoals', ['', '2026-12-10'], p => ({ body: { ok: true, age_s: 60, stores_age_s: 60, ledger_end: '2026-12-06', result: { ok: true, rows: [], picked: [] } } }), 'nothing_past_copy', 'getPeriodGoals'],
-  ['velocity: one store has no copy', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 60, body: { ok: true, rows: [{}] } }, 'velocity:river-rd': null } } }), 'missing velocity:river-rd', 'getVelocity'],
-  ['velocity: one store empty', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 60, body: { ok: true, rows: [] } } } } }), 'empty velocity:bend', 'getVelocity'],
-  ['velocity: one store 9h old', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 9 * 3600, body: { ok: true, rows: [{}] } } } } }), 'too_old velocity:bend', 'getVelocity'],
+  ['stores: copy too old (3h)', 'stores', [], p => mirror('stores', { age_s: 3 * 3600, body: { ok: true, stores: STORES } }), 'too_old', 'stores'],
+  ['stores: no copy yet', 'stores', [], p => mirror('stores', null), 'no_copy', 'stores'],
+  ['stores: a row without dutchie_name', 'stores', [], p => mirror('stores', { age_s: 60, body: { ok: true, stores: [{ store_id: 'bend' }] } }), 'bad_rows', 'stores'],
+  ['stores: gx-api down (503)', 'stores', [], p => ({ code: 503, body: { ok: false } }), 'http_503', 'stores'],
+  ['stores: network error', 'stores', [], p => null, 'Address unavailable', 'stores'],
+  ['resolve: unknown to the copy', 'resolveStore', ['Salem'], p => ({ body: { ok: true, age_s: 60, store: null } }), 'unknown_to_copy', 'stores'],
+  ['goal: none, date past the copied ledger', 'periodGoals', ['Bend', '2026-12-10'], p => ({ body: { ok: true, age_s: 60, stores_age_s: 60, ledger_end: '2026-12-06', result: null } }), 'no_goal_past_copy', 'period_goals'],
+  ['goal: copy too old', 'periodGoals', ['Bend', '2026-11-25'], p => ({ body: { ok: true, age_s: 7200, stores_age_s: 60, ledger_end: '2026-12-06', result: { dow_targets: [1] } } }), 'too_old', 'period_goals'],
+  ['period: nothing picked past the copy', 'periodGoals', ['', '2026-12-10'], p => ({ body: { ok: true, age_s: 60, stores_age_s: 60, ledger_end: '2026-12-06', result: { ok: true, rows: [], picked: [] } } }), 'nothing_past_copy', 'period_goals'],
+  ['velocity: one store has no copy', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 60, body: { ok: true, rows: [{}] } }, 'velocity:river-rd': null } } }), 'missing velocity:river-rd', 'velocity_rows'],
+  ['velocity: one store empty', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 60, body: { ok: true, rows: [] } } } } }), 'empty velocity:bend', 'velocity_rows'],
+  ['velocity: one store 9h old', 'velocity', [''], p => ({ body: { ok: true, parts: { 'velocity:bend': { age_s: 9 * 3600, body: { ok: true, rows: [{}] } } } } }), 'too_old velocity:bend', 'velocity_rows'],
   ['pace: one store\'s curve missing', 'hourlyShape', ['bend,river-rd'], p => mirror('hourly_shape:2026-11-25', { age_s: 60, body: { ok: true, shapes: { bend: { 10: 0.1 }, 'river-rd': null } } }), 'missing river-rd', 'route:hourly_shape'],
   ['pace: no curve for today yet', 'hourlyShape', ['bend'], p => mirror('hourly_shape:2026-11-25', null), 'no_copy', 'route:hourly_shape'],
 ];
@@ -124,12 +127,19 @@ for (const [label, what, args, api, reason, libFn] of cases) {
 
 console.log('\n4. it is the ONLY door to GX Core data');
 {
-  const libFn = /function coreDataLib_\([\s\S]*?\n\}/.exec(GS)[0];
   // Code only: comments are allowed to NAME the old calls (the helper's header table does).
-  const rest = GS.replace(libFn, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
-  // Fails if a call site is added (or left) that bypasses the switch.
-  for (const f of ['getStores', 'resolveStore', 'getPeriodGoals', 'getVelocity']) ok(!new RegExp('GXCore\\.' + f + '\\(').test(rest), 'no GXCore.' + f + ' outside coreDataLib_');
-  ok(!/gxCoreRoute_\('hourly_shape'/.test(rest), 'no hourly_shape route call outside coreDataLib_');
+  const code = GS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
+  // Slice 7: there is no library at all any more — not inside the helper, not anywhere.
+  // Fails if any GXCore.x( call is added back, which would also need the binding back.
+  ok(!/\bGXCore\s*\.\s*\w+\s*\(/.test(code), 'no GXCore.x() library call anywhere in the engine');
+  const coreFn = /function coreDataCore_\([\s\S]*?\n\}/.exec(GS)[0];
+  const rest = code.replace(coreFn, '');
+  // Fails if a call site reaches Core's data routes without going through the switch.
+  ok(!/gxCoreRoute_\('hourly_shape'/.test(rest), 'no hourly_shape route call outside coreDataCore_');
+  for (const r of ['stores', 'period_goals', 'velocity_rows']) {
+    ok(!new RegExp("gxCoreData(All)?_\\('" + r + "'").test(rest.replace(/function core(StoresLive|PeriodGoalsLive|VelocityLive)_\([\s\S]*?\n\}/g, '')),
+       "Core's " + r + ' route is asked only by the helper behind coreData_');
+  }
   ok(/rows = coreData_\('stores'\)/.test(GS) && /coreData_\('resolveStore', s\)/.test(GS) && /coreData_\('velocity', ''\)/.test(GS) && /coreData_\('hourlyShape', missing\.join/.test(GS),
      'the registry, the store gate, velocity and pace call the helper');
   ok(/o\.data_source = salesDataSource_\(\)/.test(GS), 'the stores reply tells the browser the switch');

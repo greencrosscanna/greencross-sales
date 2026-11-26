@@ -202,9 +202,10 @@ const gctx = {
       return { getResponseCode: () => 200, getContentText: () => step.body };
     },
   },
-  // The settled half is a LIBRARY call, in-process, with no /exec hop in it — that asymmetry is
-  // the whole reason the two halves have different odds (see phase_split_test.js). Fast on purpose.
-  GXCore: {
+  // The settled half: GX Core's sales_rows route (slice 7; it was a library call). Fast on purpose —
+  // this test is about the today half's deadline, not the settled read's cost.
+  gxCoreData_: (a, b) => require('./_core_routes_stub').coreRoutesFrom(gctx.CORE_FIXTURE).gxCoreData_(a, b),
+  CORE_FIXTURE: {
     getSalesDaily(store, from, to) {
       if (salesDailyFail[store]) throw new Error(salesDailyFail[store]);
       clock += 60;

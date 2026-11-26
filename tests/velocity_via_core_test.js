@@ -32,15 +32,26 @@ function grab(src, name) {
 }
 const SIX = [{core:'bend',dutchie:'Bend',sales:'Bend'},{core:'river-rd',dutchie:'River Rd',sales:'River'}];
 
-function backend(getVelocity, cache) {
+/* GX Core's registry (salem is in Core but not a Sales store) and its velocity, ALL stores at once:
+ * `allRows()` is what getVelocity('') would have returned. Since slice 7 Core's velocity_rows route is
+ * asked once per registry store, so the route answers each store with its own slice of allRows(). */
+const REG = [{ store_id: 'bend', dutchie_name: 'Bend' }, { store_id: 'river-rd', dutchie_name: 'River Rd' }, { store_id: 'salem', dutchie_name: 'Salem' }];
+function backend(allRows, cache, failStore) {
   const store = cache || {};
+  const w = { batches: [], asked: [] };
+  const routes = require('./_core_routes_stub').coreRoutesFrom({
+    getStores: () => REG,
+    getVelocity: s => { w.asked.push(s); if (s === failStore) throw new Error('hop timed out'); return allRows().filter(r => r.store === s); },
+  });
   const ctx = {
-    GXCore: { getVelocity },
+    gxCoreData_: routes.gxCoreData_,
+    gxCoreDataAll_: (a, bodies) => { w.batches.push(bodies.length); return routes.gxCoreDataAll_(a, bodies); },
+    probeMark_: () => {},
     salesStores_: () => SIX,
     cacheGet_: k => store[k] || null,
     cacheSet_: (k, v) => { store[k] = v; },
     Utilities: { formatDate: () => '2026-09-14T12:00:00' },
-    _cache: store,
+    _cache: store, _w: w,
   };
   vm.createContext(ctx);
   vm.runInContext('var _GX_SECRET_MEMO_ = null;', ctx);
@@ -56,13 +67,14 @@ const row = (store, name, v) => Object.assign({ store, product_name: name, sku: 
 
 console.log('\n1. backend — reads GX Core and keys by the Dutchie name the client maps to');
 {
-  let asked = null;
-  const B = backend(s => { asked = s; return [
+  const B = backend(() => [
     row('bend', 'Gummy', { vel14: 3 }), row('river-rd', 'Joint', { vel30: 0.5 }),
     row('bend', 'Dead SKU', {}), row('bend', 'Unknown', { vel7: 9 }), row('salem', 'Elsewhere', { vel7: 1 }),
-  ]; });
+  ]);
   const r = B.getVelocity_({});
-  ok(asked === '', 'asks GX Core for all stores in one call');
+  // Fails if the stores are asked one after another (three hops in series) or one is skipped.
+  ok(B._w.batches.length === 1 && B._w.batches[0] === 3 && B._w.asked.join() === 'bend,river-rd,salem',
+     'asks GX Core for every registry store, in ONE parallel batch');
   ok(r.ok === true && r.source === 'gxcore', 'answers ok, sourced from GX Core');
   ok(r.stores.Bend && r.stores.Bend.Gummy.vel14 === 3, 'Bend keyed by its Dutchie name');
   ok(r.stores['River Rd'] && r.stores['River Rd'].Joint.vel30 === 0.5, "River keyed 'River Rd' — what STORE_TO_VEL maps River to");
@@ -83,18 +95,23 @@ console.log('\n2. backend — an empty or failed answer is an ERROR, and is not 
   const T = backend(() => { throw new Error('Core exploded'); });
   const t = T.getVelocity_({});
   ok(t.ok === false && /GX Core velocity unavailable/.test(t.error) && !T._cache.velocity_v1, 'a throwing Core => named error, not cached');
+  // ALL OR NOTHING. Fails if coreVelocityLive_ concatenated the stores that answered and returned:
+  // River would then read as selling nothing, the green-0 shape this file was written against.
+  const P = backend(() => [row('bend', 'Gummy', { vel7: 1 }), row('river-rd', 'Joint', { vel7: 1 })], null, 'river-rd');
+  const p = P.getVelocity_({});
+  ok(p.ok === false && /river-rd/.test(p.error) && !P._cache.velocity_v1, 'ONE store failing => named error naming it, not a smaller answer, not cached');
 }
 
 console.log('\n3. backend — cache served, nocache bypasses, a corrupt entry costs a read');
 {
-  let calls = 0;
-  const B = backend(() => { calls++; return [row('bend', 'Gummy', { vel7: 1 })]; });
+  const B = backend(() => [row('bend', 'Gummy', { vel7: 1 })]);
+  const calls = () => B._w.batches.length;
   B.getVelocity_({}); B.getVelocity_({});
-  ok(calls === 1, 'second call served from cache');
+  ok(calls() === 1, 'second call served from cache');
   B.getVelocity_({ nocache: '1' });
-  ok(calls === 2, 'nocache re-reads GX Core');
+  ok(calls() === 2, 'nocache re-reads GX Core');
   B._cache.velocity_v1 = '{not json';
-  ok(B.getVelocity_({}).ok === true && calls === 3, 'a corrupt cache entry falls through to a read');
+  ok(B.getVelocity_({}).ok === true && calls() === 3, 'a corrupt cache entry falls through to a read');
 }
 
 console.log('\n4. routing — no app-to-app call is left');

@@ -62,9 +62,13 @@ const LEDGER = {
 };
 
 function ctxWith(fns, extra) {
-  const ctx = Object.assign({ console, jsonOut_: o => o }, extra || {});
+  extra = extra || {};
+  // `GXCore` here is a library-shaped fixture; GX Core's routes answer from it (slice 7: no library).
+  const routes = extra.GXCore ? require('./_core_routes_stub').routesWorld(extra.GXCore) : {};
+  const ctx = Object.assign({ console, jsonOut_: o => o }, routes, extra);
+  delete ctx.GXCore;
   vm.createContext(ctx);
-  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GXCore)
+  vm.runInContext(require('./_core_data_src'), ctx);   // the shipped coreData_ (switch off → GX Core's routes)
   fns.forEach(n => vm.runInContext(grab(n), ctx));
   return ctx;
 }
@@ -127,7 +131,7 @@ console.log('\n3. the loader stretches at the READ — both paths, applied exact
 
   const fast = ctxWith(['pgStretchDaily_', 'pgStretchTargets_', 'pgLoadPeriod_'], {
     salesStores_: () => [{ core: 'bend', dutchie: 'Bend', sales: 'Bend' }],
-    GXCore: { getPeriodGoals: () => ({ picked }) },
+    GXCore: { getPeriodGoals: () => ({ ok: true, rows: picked, picked }) },
   });
   const a = fast.pgLoadPeriod_('2026-09-07', byId);
   ok('the batched path returns STRETCHED targets', a.goals.Bend && a.goals.Bend.dow_targets[1] === 4559);
